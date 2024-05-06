@@ -1,4 +1,4 @@
-use crate::types::Pool;
+use crate::types::{JobUpdate, Pool};
 use crate::utils;
 use async_channel::{bounded, Receiver, Sender};
 use async_std::{
@@ -10,7 +10,7 @@ use async_std::{
 };
 use log::{debug, error, info};
 use std::net::ToSocketAddrs;
-use std::{net::SocketAddr, time, time::Duration};
+use std::time::Duration;
 use sv1_api::{
     client_to_server,
     error::Error,
@@ -28,6 +28,7 @@ fn extranonce_from_hex<'a>(hex: &str) -> Extranonce<'a> {
 
 pub struct Client<'a> {
     pool: Pool,
+    job_sender: Sender<JobUpdate<'a>>,
     message_id: u64,
     extranonce1: Extranonce<'a>,
     extranonce2_size: usize,
@@ -62,7 +63,10 @@ pub async fn initialize_client(client: Arc<Mutex<Client<'static>>>) {
 }
 
 impl<'a> Client<'static> {
-    pub async fn new(pool: &Pool) -> Arc<Mutex<Client<'static>>> {
+    pub async fn new(
+        pool: &Pool,
+        job_sender: Sender<JobUpdate<'static>>,
+    ) -> Arc<Mutex<Client<'static>>> {
         // TODO: handle errors
         let socket = pool.endpoint.to_socket_addrs().unwrap().next().unwrap();
 
@@ -105,6 +109,7 @@ impl<'a> Client<'static> {
         let client = Client {
             pool: pool.clone(),
             message_id: 0,
+            job_sender,
             extranonce1: extranonce_from_hex("00000000"),
             extranonce2_size: 2,
             version_rolling_mask: None,
@@ -207,8 +212,16 @@ impl<'a> IsClient<'a> for Client<'a> {
     }
 
     fn handle_notify(&mut self, notify: server_to_client::Notify<'a>) -> Result<(), Error<'a>> {
-        self.last_notify = Some(notify);
-
+        self.last_notify = Some(notify.clone());
+        let job_update = JobUpdate {
+            pool: self.pool.clone(),
+            job: notify.clone(),
+            extranonce1: self.extranonce1.clone(),
+            extranonce2_size: self.extranonce2_size,
+        };
+        if let Err(e) = self.job_sender.try_send(job_update) {
+            error!("Failed to send JobUpdate for {}: {}", self.pool.name, e);
+        }
         Ok(())
     }
 
