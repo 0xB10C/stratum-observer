@@ -1,6 +1,7 @@
 use crate::types::{JobUpdate, Pool};
 use crate::utils;
 use async_channel::{bounded, Receiver, Sender};
+use async_std::net::Shutdown;
 use async_std::{
     io::BufReader,
     net::TcpStream,
@@ -8,9 +9,11 @@ use async_std::{
     sync::{Arc, Mutex},
     task,
 };
+use log::warn;
 use log::{debug, error, info};
 use std::net::ToSocketAddrs;
 use std::time::Duration;
+use std::time::{Instant};
 use sv1_api::{
     client_to_server,
     error::Error,
@@ -20,6 +23,7 @@ use sv1_api::{
 };
 
 const USER_AGENT: &str = "stratum-observer";
+const STRATUM_JOB_TIMEOUT_SECONDS: u64 = 60;
 
 fn extranonce_from_hex<'a>(hex: &str) -> Extranonce<'a> {
     let data = utils::decode_hex(hex).unwrap();
@@ -30,6 +34,7 @@ pub struct Client<'a> {
     pool: Pool,
     job_sender: Sender<JobUpdate<'a>>,
     message_id: u64,
+    time_last_notify: Option<Instant>,
     extranonce1: Extranonce<'a>,
     extranonce2_size: usize,
     version_rolling_mask: Option<HexU32Be>,
@@ -40,6 +45,7 @@ pub struct Client<'a> {
     authorized: Vec<String>,
     receiver_incoming: Receiver<String>,
     sender_outgoing: Sender<String>,
+    is_alive: bool,
 }
 
 pub async fn initialize_client(client: Arc<Mutex<Client<'static>>>) {
@@ -56,9 +62,14 @@ pub async fn initialize_client(client: Arc<Mutex<Client<'static>>>) {
         drop(client_);
         task::sleep(Duration::from_millis(1000)).await;
     }
-    task::sleep(Duration::from_millis(2000)).await;
+    task::sleep(Duration::from_millis(1000)).await;
     loop {
-        task::sleep(Duration::from_millis(2000)).await;
+        task::sleep(Duration::from_millis(1000)).await;
+        let client_ = client.lock().await;
+        if !client_.is_alive {
+            debug!("Shutdown client for pool {}", client_.pool.name);
+            break;
+        }
     }
 }
 
@@ -86,7 +97,7 @@ impl<'a> Client<'static> {
 
         let arc_stream = Arc::new(stream);
 
-        let (reader, writer) = (arc_stream.clone(), arc_stream);
+        let (reader, writer) = (arc_stream.clone(), arc_stream.clone());
 
         let (sender_incoming, receiver_incoming) = bounded(10);
         let (sender_outgoing, receiver_outgoing) = bounded(10);
@@ -110,6 +121,7 @@ impl<'a> Client<'static> {
             pool: pool.clone(),
             message_id: 0,
             job_sender,
+            time_last_notify: None,
             extranonce1: extranonce_from_hex("00000000"),
             extranonce2_size: 2,
             version_rolling_mask: None,
@@ -120,6 +132,7 @@ impl<'a> Client<'static> {
             authorized: vec![],
             receiver_incoming,
             sender_outgoing,
+            is_alive: true,
         };
 
         let client = Arc::new(Mutex::new(client));
@@ -131,6 +144,21 @@ impl<'a> Client<'static> {
                 if let Some(mut self_) = cloned.try_lock() {
                     let incoming = self_.receiver_incoming.try_recv();
                     self_.parse_message(incoming).await;
+                    if let Some(time_last_notify) = self_.time_last_notify {
+                        if time_last_notify.elapsed()
+                            > Duration::from_secs(STRATUM_JOB_TIMEOUT_SECONDS)
+                            && self_.is_alive
+                        {
+                            warn!(
+                                "No notify from {} in more than {}s: disconnecting...",
+                                self_.pool.name, STRATUM_JOB_TIMEOUT_SECONDS
+                            );
+                            self_.is_alive = false;
+                            arc_stream
+                                .shutdown(Shutdown::Both)
+                                .expect("shutdown call failed");
+                        }
+                    }
                 }
                 // It's healthy to sleep after giving up the lock so the other thread has a shot
                 // at acquiring it - it also prevents pegging the cpu
@@ -217,6 +245,7 @@ impl<'a> IsClient<'a> for Client<'a> {
     }
 
     fn handle_notify(&mut self, notify: server_to_client::Notify<'a>) -> Result<(), Error<'a>> {
+        self.time_last_notify = Some(Instant::now());
         self.last_notify = Some(notify.clone());
         let job_update = JobUpdate {
             pool: self.pool.clone(),

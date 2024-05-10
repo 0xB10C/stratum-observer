@@ -1,5 +1,5 @@
 use bitcoin::hashes::sha256d::Hash;
-use bitcoin::Transaction;
+
 use serde::Deserialize;
 use sv1_api::server_to_client;
 use sv1_api::utils::Extranonce;
