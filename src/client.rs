@@ -13,7 +13,7 @@ use log::warn;
 use log::{debug, error, info};
 use std::net::ToSocketAddrs;
 use std::time::Duration;
-use std::time::{Instant};
+use std::time::Instant;
 use sv1_api::{
     client_to_server,
     error::Error,
@@ -60,11 +60,11 @@ pub async fn initialize_client(client: Arc<Mutex<Client<'static>>>) {
             }
         }
         drop(client_);
-        task::sleep(Duration::from_millis(1000)).await;
+        task::sleep(Duration::from_secs(1)).await;
     }
-    task::sleep(Duration::from_millis(1000)).await;
+    task::sleep(Duration::from_secs(1)).await;
     loop {
-        task::sleep(Duration::from_millis(1000)).await;
+        task::sleep(Duration::from_secs(1)).await;
         let client_ = client.lock().await;
         if !client_.is_alive {
             debug!("Shutdown client for pool {}", client_.pool.name);
@@ -84,12 +84,12 @@ impl<'a> Client<'static> {
         let stream = loop {
             match TcpStream::connect(socket).await {
                 Ok(st) => {
-                    info!("CLIENT - connected to server at {}", socket);
+                    info!("Connected to pool '{}'", pool.name);
                     break st;
                 }
                 Err(_) => {
-                    info!("Server {} not ready... retry", pool.endpoint);
-                    task::sleep(Duration::from_secs(1)).await;
+                    info!("Pool '{}' unreachable...", pool.name);
+                    task::sleep(Duration::from_secs(2)).await;
                     continue;
                 }
             }
@@ -101,21 +101,6 @@ impl<'a> Client<'static> {
 
         let (sender_incoming, receiver_incoming) = bounded(10);
         let (sender_outgoing, receiver_outgoing) = bounded(10);
-
-        task::spawn(async move {
-            let mut messages = BufReader::new(&*reader).lines();
-            while let Some(message) = messages.next().await {
-                let message = message.unwrap();
-                sender_incoming.send(message).await.unwrap();
-            }
-        });
-
-        task::spawn(async move {
-            loop {
-                let message: String = receiver_outgoing.recv().await.unwrap();
-                (&*writer).write_all(message.as_bytes()).await.unwrap();
-            }
-        });
 
         let client = Client {
             pool: pool.clone(),
@@ -137,8 +122,35 @@ impl<'a> Client<'static> {
 
         let client = Arc::new(Mutex::new(client));
 
+        // Inbound message receive task
         let cloned = client.clone();
+        let arc_stream_inbound = arc_stream.clone();
+        task::spawn(async move {
+            let mut messages = BufReader::new(&*reader).lines();
+            while let Some(message) = messages.next().await {
+                let message = message.unwrap();
+                sender_incoming.send(message).await.unwrap();
+            }
+            if let Some(mut self_) = cloned.try_lock() {
+                debug!("Stream with '{}' closed", self_.pool.name);
+                self_.is_alive = false;
+                arc_stream_inbound
+                    .shutdown(Shutdown::Both)
+                    .expect("shutdown call failed");
+            }
+        });
 
+        // Outbound message send task
+        task::spawn(async move {
+            loop {
+                let message: String = receiver_outgoing.recv().await.unwrap();
+                (&*writer).write_all(message.as_bytes()).await.unwrap();
+            }
+        });
+
+        // Message parsing and processing task
+        let arc_stream_parse_msg = arc_stream.clone();
+        let cloned = client.clone();
         task::spawn(async move {
             loop {
                 if let Some(mut self_) = cloned.try_lock() {
@@ -154,7 +166,7 @@ impl<'a> Client<'static> {
                                 self_.pool.name, STRATUM_JOB_TIMEOUT_SECONDS
                             );
                             self_.is_alive = false;
-                            arc_stream
+                            arc_stream_parse_msg
                                 .shutdown(Shutdown::Both)
                                 .expect("shutdown call failed");
                         }

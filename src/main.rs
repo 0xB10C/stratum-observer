@@ -24,8 +24,11 @@ fn main() {
     for pool in config.pools.clone() {
         let js = job_sender.clone();
         task::spawn(async move {
-            let client = Client::new(&pool, js).await;
-            initialize_client(client).await;
+            // reopen clients if a client looses or closes the connection
+            loop {
+                let client = Client::new(&pool, js.clone()).await;
+                initialize_client(client).await;
+            }
         });
     }
 
@@ -37,7 +40,6 @@ fn main() {
     task::block_on(async {
         loop {
             let job = job_receiver.recv().await.unwrap();
-            println!("new job");
             visualization_sender.send(job).await.unwrap();
         }
     });
@@ -82,6 +84,7 @@ async fn terminal_visualization_task(receiver: Receiver<JobUpdate<'_>>) {
                 cb.output.iter().map(|o| o.value.to_btc()).sum::<f64>()
             );
         }
+        println!("\n\n");
     }
 }
 
