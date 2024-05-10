@@ -1,4 +1,4 @@
-use async_channel::{bounded, unbounded, Receiver, Sender};
+use async_channel::{unbounded, Receiver};
 use async_std::task;
 use client::{initialize_client, Client};
 use env_logger::Env;
@@ -50,20 +50,35 @@ async fn terminal_visualization_task(receiver: Receiver<JobUpdate<'_>>) {
         last_job.insert(job.pool.clone().name, job);
 
         for (_, j) in last_job.iter() {
-            let template_colors: String = j.job.merkle_branch.iter().map(|branch| colored(branch.as_ref()[1] % 255, "  ")).collect::<Vec<String>>().join("");
+            let template_colors: String = j
+                .job
+                .merkle_branch
+                .iter()
+                .map(|branch| colored(branch.as_ref()[1] % 255, "  "))
+                .collect::<Vec<String>>()
+                .join("");
             let cb = j.clone().coinbase();
+            let coinbase_script_sig = &cb
+                .input
+                .first()
+                .expect("coinbase should only have one input")
+                .script_sig;
+            let prevhash = j.prev_block_hash();
+            let prevhash_colored = colored(prevhash[0], &prevhash.to_string());
+            let coinbase_string: String = coinbase_script_sig
+                .clone()
+                .into_bytes()
+                .iter()
+                .filter(|b| **b >= 32 && **b <= 126)
+                .map(|b| *b as char)
+                .collect();
             println!(
-                "{: <18} {} {: >6} {} {:2.8} BTC",
+                "{: <18} {:<50} {} {: <28} {} {:2.8} BTC",
                 j.pool.name,
-                j.prev_block_hash().to_string(),
+                coinbase_string,
+                prevhash_colored,
                 template_colors,
-                bip34_coinbase_block_height(
-                    &cb.input
-                        .first()
-                        .expect("coinbase should only have one input")
-                        .script_sig
-                )
-                .unwrap_or_default(),
+                bip34_coinbase_block_height(&coinbase_script_sig).unwrap_or_default(),
                 cb.output.iter().map(|o| o.value.to_btc()).sum::<f64>()
             );
         }
