@@ -50,11 +50,13 @@ async fn terminal_visualization_task(receiver: Receiver<JobUpdate<'_>>) {
         last_job.insert(job.pool.clone().name, job);
 
         for (_, j) in last_job.iter() {
+            let template_colors: String = j.job.merkle_branch.iter().map(|branch| colored(branch.as_ref()[1] % 255, "  ")).collect::<Vec<String>>().join("");
             let cb = j.clone().coinbase();
             println!(
-                "{: <18} {} {: >6}   {:2.8} BTC",
+                "{: <18} {} {: >6} {} {:2.8} BTC",
                 j.pool.name,
                 j.prev_block_hash().to_string(),
+                template_colors,
                 bip34_coinbase_block_height(
                     &cb.input
                         .first()
@@ -66,4 +68,8 @@ async fn terminal_visualization_task(receiver: Receiver<JobUpdate<'_>>) {
             );
         }
     }
+}
+
+fn colored(color: u8, text: &str) -> String {
+    return format!("\x1B[48;5;{}m{}\x1B[0m", color, text);
 }
