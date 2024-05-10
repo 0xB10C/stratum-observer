@@ -186,6 +186,11 @@ impl<'a> Client<'static> {
     pub async fn send_configure(&mut self) {
         let configure = self.configure(self.message_id);
         self.send_message(&configure).await;
+        // since we currently don't need to configure anything, treat
+        // having send the configure message as being configured.
+        // This allows us to support pools that don't respond to the (optional)
+        // configure message.
+        self.status = ClientStatus::Configured;
     }
 }
 
