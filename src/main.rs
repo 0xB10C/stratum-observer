@@ -89,5 +89,5 @@ async fn terminal_visualization_task(receiver: Receiver<JobUpdate<'_>>) {
 }
 
 fn colored(color: u8, text: &str) -> String {
-    return format!("\x1B[48;5;{}m{}\x1B[0m", color, text);
+    return format!("\x1B[48;5;{}m\x1B[38;5;0m{}\x1B[0m", color, text);
 }
