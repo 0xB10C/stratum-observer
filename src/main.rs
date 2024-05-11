@@ -75,7 +75,7 @@ async fn terminal_visualization_task(receiver: Receiver<JobUpdate<'_>>) {
                 .map(|b| *b as char)
                 .collect();
             println!(
-                "{: <18} {:<50} {} {} {:2.8} BTC {:>4}s {:>2}s {}",
+                "{: <18} {:<50} {} {} {:2.8} BTC {:>4}s {:>2}s {:>5} {}",
                 j.pool.name,
                 coinbase_string,
                 prevhash_colored,
@@ -83,6 +83,7 @@ async fn terminal_visualization_task(receiver: Receiver<JobUpdate<'_>>) {
                 cb.output.iter().map(|o| o.value.to_btc()).sum::<f64>(),
                 j.time_connected_seconds(),
                 j.age(),
+                j.job.clean_jobs,
                 template_colors,
             );
         }
