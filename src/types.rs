@@ -1,6 +1,7 @@
 use bitcoin::hashes::sha256d::Hash;
 
 use serde::Deserialize;
+use std::time::{SystemTime, UNIX_EPOCH};
 use sv1_api::server_to_client;
 use sv1_api::utils::Extranonce;
 
@@ -20,6 +21,8 @@ pub struct JobUpdate<'a> {
     pub job: server_to_client::Notify<'a>,
     pub extranonce1: Extranonce<'a>,
     pub extranonce2_size: usize,
+    /// Time the client connection was established.
+    pub time_connected: u128,
 }
 
 impl JobUpdate<'_> {
@@ -42,5 +45,14 @@ impl JobUpdate<'_> {
         let h: &[u8] = self.job.prev_hash.as_ref();
         let array: [u8; 32] = h.try_into().expect("prev_hash should always be 32 byte");
         bitcoin::BlockHash::from_raw_hash(*Hash::from_bytes_ref(&array))
+    }
+
+    pub fn time_connected_seconds(&self) -> u64 {
+        ((SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime before UNIX EPOCH")
+            .as_millis()
+            - self.time_connected)
+            / 1000) as u64
     }
 }
