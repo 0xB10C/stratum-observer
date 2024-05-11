@@ -17,6 +17,8 @@ pub struct Pool {
 
 #[derive(Debug, Clone)]
 pub struct JobUpdate<'a> {
+    /// Timestamp in milliseconds since UNIX_EPOCH.
+    pub timestamp: u128,
     pub pool: Pool,
     pub job: server_to_client::Notify<'a>,
     pub extranonce1: Extranonce<'a>,
@@ -53,6 +55,16 @@ impl JobUpdate<'_> {
             .expect("SystemTime before UNIX EPOCH")
             .as_millis()
             - self.time_connected)
+            / 1000) as u64
+    }
+
+    /// Age of the JobUpdate in seconds.
+    pub fn age(&self) -> u64 {
+        ((SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime before UNIX EPOCH")
+            .as_millis()
+            - self.timestamp)
             / 1000) as u64
     }
 }

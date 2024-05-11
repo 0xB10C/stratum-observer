@@ -264,6 +264,10 @@ impl<'a> IsClient<'a> for Client<'a> {
         self.time_last_notify = Some(Instant::now());
         self.last_notify = Some(notify.clone());
         let job_update = JobUpdate {
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("SystemTime before UNIX EPOCH")
+                .as_millis(),
             pool: self.pool.clone(),
             job: notify.clone(),
             extranonce1: self.extranonce1.clone(),
