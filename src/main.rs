@@ -10,7 +10,7 @@ mod types;
 mod utils;
 
 use crate::types::JobUpdate;
-use crate::utils::bip34_coinbase_block_height;
+use crate::utils::{bip34_coinbase_block_height, extract_coinbase_string};
 
 fn main() {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
@@ -67,17 +67,10 @@ async fn terminal_visualization_task(receiver: Receiver<JobUpdate<'_>>) {
                 .script_sig;
             let prevhash = j.prev_block_hash();
             let prevhash_colored = colored(prevhash[0], &prevhash.to_string());
-            let coinbase_string: String = coinbase_script_sig
-                .clone()
-                .into_bytes()
-                .iter()
-                .filter(|b| **b >= 32 && **b <= 126)
-                .map(|b| *b as char)
-                .collect();
             println!(
                 "{: <18} {:<50} {} {} {:2.8} BTC {:>4}s {:>2}s {:>5} {}",
                 j.pool.name,
-                coinbase_string,
+                extract_coinbase_string(coinbase_script_sig),
                 prevhash_colored,
                 bip34_coinbase_block_height(&coinbase_script_sig).unwrap_or_default(),
                 cb.output.iter().map(|o| o.value.to_btc()).sum::<f64>(),

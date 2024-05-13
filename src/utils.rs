@@ -29,6 +29,22 @@ pub fn bip34_coinbase_block_height(script: &ScriptBuf) -> Option<u32> {
     Some(u32::from_le_bytes(array))
 }
 
+pub fn extract_coinbase_string(script: &ScriptBuf) -> String {
+    let mut coinbase_string = String::new();
+    let mut buffer = String::new();
+    for b in script.clone().into_bytes() {
+        if b >= 32 && b <= 126 {
+            buffer.push(b as char);
+        } else {
+            if buffer.len() >= 6 {
+                coinbase_string.push_str(&buffer);
+            }
+            buffer.clear();
+        }
+    }
+    coinbase_string
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
