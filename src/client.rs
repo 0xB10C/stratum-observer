@@ -159,6 +159,21 @@ impl<'a> Client<'static> {
                 if let Some(mut self_) = cloned.try_lock() {
                     let incoming = self_.receiver_incoming.try_recv();
                     self_.parse_message(incoming).await;
+                    if let Some(max_lifetime) = self_.pool.max_lifetime {
+                        let duration_connected = Utc::now() - self_.time_connected;
+                        if duration_connected > TimeDelta::seconds(max_lifetime.into())
+                            && self_.is_alive
+                        {
+                            debug!(
+                                "Closing connection to {} as the connection is {:?} old (max_lifetime={}s)",
+                                self_.pool.name, duration_connected, max_lifetime,
+                            );
+                            self_.is_alive = false;
+                            arc_stream_parse_msg
+                                .shutdown(Shutdown::Both)
+                                .expect("shutdown call failed");
+                        }
+                    }
                     if let Some(time_last_notify) = self_.time_last_notify {
                         if time_last_notify.elapsed()
                             > Duration::from_secs(STRATUM_JOB_TIMEOUT_SECONDS)
@@ -172,21 +187,6 @@ impl<'a> Client<'static> {
                             arc_stream_parse_msg
                                 .shutdown(Shutdown::Both)
                                 .expect("shutdown call failed");
-                        }
-                        if let Some(max_lifetime) = self_.pool.max_lifetime {
-                            let duration_connected = self_.time_connected - Utc::now();
-                            if duration_connected > TimeDelta::seconds(max_lifetime.into())
-                                && self_.is_alive
-                            {
-                                debug!(
-                                    "Closing connection to {} as the connection is {:?} old (max_lifetime={}s)",
-                                    self_.pool.name, duration_connected, max_lifetime,
-                                );
-                                self_.is_alive = false;
-                                arc_stream_parse_msg
-                                    .shutdown(Shutdown::Both)
-                                    .expect("shutdown call failed");
-                            }
                         }
                     }
                 }
