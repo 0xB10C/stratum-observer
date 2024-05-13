@@ -83,4 +83,27 @@ mod tests {
         // FIXME
         // assert ..
     }
+
+    #[test]
+    fn load_pool_with_max_lifetime_config() {
+        let config_string = r#"
+            database_path = "abc"
+            pools = [
+                { endpoint = "stratum.example.com", name = "Example", user = "username", password = "password123", max_lifetime=1337 },
+                { endpoint = "stratum2.example.com", name = "Example2", user = "username2", password = "123password" },
+            ]
+        "#;
+        let config: Config = toml::from_str(&config_string).unwrap();
+        assert_eq!(config.database_path, "abc");
+        assert_eq!(config.pools[0].endpoint, "stratum.example.com");
+        assert_eq!(config.pools[0].name, "Example");
+        assert_eq!(config.pools[0].user, "username");
+        assert_eq!(config.pools[0].password, "password123");
+        assert_eq!(config.pools[0].max_lifetime, Some(1337));
+        assert_eq!(config.pools[1].endpoint, "stratum2.example.com");
+        assert_eq!(config.pools[1].name, "Example2");
+        assert_eq!(config.pools[1].user, "username2");
+        assert_eq!(config.pools[1].password, "123password");
+        assert_eq!(config.pools[1].max_lifetime, None);
+    }
 }

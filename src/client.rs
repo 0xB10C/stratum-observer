@@ -33,7 +33,7 @@ pub struct Client<'a> {
     pool: Pool,
     job_sender: Sender<JobUpdate<'a>>,
     message_id: u64,
-    time_connected: u128,
+    time_connected: SystemTime,
     time_last_notify: Option<Instant>,
     extranonce1: Extranonce<'a>,
     extranonce2_size: usize,
@@ -107,10 +107,7 @@ impl<'a> Client<'static> {
             message_id: 0,
             job_sender,
             time_last_notify: None,
-            time_connected: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("SystemTime before UNIX EPOCH")
-                .as_millis(),
+            time_connected: SystemTime::now(),
             extranonce1: extranonce_from_hex("00000000"),
             extranonce2_size: 2,
             version_rolling_mask: None,
@@ -173,6 +170,21 @@ impl<'a> Client<'static> {
                             arc_stream_parse_msg
                                 .shutdown(Shutdown::Both)
                                 .expect("shutdown call failed");
+                        }
+                        if let Some(max_lifetime) = self_.pool.max_lifetime {
+                            let duration_connected = self_.time_connected.elapsed().unwrap();
+                            if duration_connected > Duration::from_secs(max_lifetime.into())
+                                && self_.is_alive
+                            {
+                                debug!(
+                                    "Closing connection to {} as the connection is {:?} old (max_lifetime={}s)",
+                                    self_.pool.name, duration_connected, max_lifetime,
+                                );
+                                self_.is_alive = false;
+                                arc_stream_parse_msg
+                                    .shutdown(Shutdown::Both)
+                                    .expect("shutdown call failed");
+                            }
                         }
                     }
                 }
@@ -272,7 +284,11 @@ impl<'a> IsClient<'a> for Client<'a> {
             job: notify.clone(),
             extranonce1: self.extranonce1.clone(),
             extranonce2_size: self.extranonce2_size,
-            time_connected: self.time_connected,
+            time_connected: self
+                .time_connected
+                .duration_since(UNIX_EPOCH)
+                .expect("SystemTime before UNIX EPOCH")
+                .as_millis(),
         };
         if let Err(e) = self.job_sender.try_send(job_update) {
             error!("Failed to send JobUpdate for {}: {}", self.pool.name, e);

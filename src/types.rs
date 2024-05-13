@@ -13,6 +13,9 @@ pub struct Pool {
     //is_v2: bool,
     pub user: String,
     pub password: String,
+    /// Optional maximum age of the connection in seconds before we close it and open a new one.
+    /// If None, keep the connection open for as long as possible.
+    pub max_lifetime: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
