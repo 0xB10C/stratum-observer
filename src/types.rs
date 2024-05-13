@@ -1,7 +1,9 @@
+use crate::schema::job_updates;
+use crate::utils::{bip34_coinbase_block_height, encode_hex, extract_coinbase_string};
 use bitcoin::hashes::sha256d::Hash;
-
+use chrono::prelude::*;
+use diesel::Insertable;
 use serde::Deserialize;
-use std::time::{SystemTime, UNIX_EPOCH};
 use sv1_api::server_to_client;
 use sv1_api::utils::Extranonce;
 
@@ -18,16 +20,71 @@ pub struct Pool {
     pub max_lifetime: Option<u32>,
 }
 
+#[derive(Insertable)]
+#[diesel(table_name = job_updates)]
+pub struct NewJobUpdate {
+    pub timestamp: chrono::NaiveDateTime,
+    pub pool_name: String,
+    pub coinbase_tag: String,
+    pub prev_hash: String,
+    pub merkle_branches: String,
+    pub height: i64,
+    pub output_sum: i64,
+    pub header_version: i64,
+    pub header_bits: i64,
+    pub header_time: i64,
+    pub clean_jobs: bool,
+    pub extranonce1: Vec<u8>,
+    pub extranonce2_size: i32,
+}
+
+impl From<JobUpdate<'_>> for NewJobUpdate {
+    fn from(o: JobUpdate<'_>) -> Self {
+        let cb = o.clone().coinbase();
+        let coinbase_script_sig = &cb
+            .input
+            .first()
+            .expect("coinbase should have an input")
+            .script_sig;
+
+        NewJobUpdate {
+            timestamp: o.timestamp.naive_utc(),
+            pool_name: o.pool.name.clone(),
+            coinbase_tag: extract_coinbase_string(coinbase_script_sig),
+            prev_hash: o.prev_block_hash().to_string(),
+            merkle_branches: o
+                .job
+                .merkle_branch
+                .iter()
+                .map(|b| encode_hex(b.as_ref()))
+                .collect::<Vec<String>>()
+                .join(":"),
+            height: (bip34_coinbase_block_height(&coinbase_script_sig).unwrap_or_default() as i64),
+            output_sum: cb
+                .output
+                .iter()
+                .map(|o| o.value.to_sat() as i64)
+                .sum::<i64>(),
+            header_version: (o.job.version.0 as i64),
+            header_bits: o.job.bits.0 as i64,
+            header_time: o.job.time.0 as i64,
+            extranonce1: o.extranonce1.as_ref().to_vec(),
+            extranonce2_size: o.extranonce2_size as i32,
+            clean_jobs: o.job.clean_jobs,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct JobUpdate<'a> {
-    /// Timestamp in milliseconds since UNIX_EPOCH.
-    pub timestamp: u128,
+    /// JobUpdate timestamp
+    pub timestamp: DateTime<Utc>,
     pub pool: Pool,
     pub job: server_to_client::Notify<'a>,
     pub extranonce1: Extranonce<'a>,
     pub extranonce2_size: usize,
     /// Time the client connection was established.
-    pub time_connected: u128,
+    pub time_connected: DateTime<Utc>,
 }
 
 impl JobUpdate<'_> {
@@ -52,22 +109,12 @@ impl JobUpdate<'_> {
         bitcoin::BlockHash::from_raw_hash(*Hash::from_bytes_ref(&array))
     }
 
-    pub fn time_connected_seconds(&self) -> u64 {
-        ((SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime before UNIX EPOCH")
-            .as_millis()
-            - self.time_connected)
-            / 1000) as u64
+    pub fn time_connected_seconds(&self) -> i64 {
+        (Utc::now() - self.time_connected).num_seconds()
     }
 
     /// Age of the JobUpdate in seconds.
-    pub fn age(&self) -> u64 {
-        ((SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("SystemTime before UNIX EPOCH")
-            .as_millis()
-            - self.timestamp)
-            / 1000) as u64
+    pub fn age(&self) -> i64 {
+        (Utc::now() - self.timestamp).num_seconds()
     }
 }

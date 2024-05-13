@@ -1,16 +1,23 @@
+use crate::schema::job_updates;
+use crate::types::JobUpdate;
+use crate::types::NewJobUpdate;
+use crate::utils::{bip34_coinbase_block_height, extract_coinbase_string};
 use async_channel::{unbounded, Receiver};
 use async_std::task;
 use client::{initialize_client, Client};
+use diesel::prelude::*;
+use diesel::sqlite::SqliteConnection;
+use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use env_logger::Env;
 use std::collections::BTreeMap;
 
 mod client;
 mod config;
+mod schema;
 mod types;
 mod utils;
 
-use crate::types::JobUpdate;
-use crate::utils::{bip34_coinbase_block_height, extract_coinbase_string};
+pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations/");
 
 fn main() {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
@@ -37,12 +44,31 @@ fn main() {
         terminal_visualization_task(visulization_receiver).await;
     });
 
+    let (sqlite_sender, sqlite_receiver) = unbounded();
+    task::spawn(async move {
+        sqlite_writer_task(sqlite_receiver).await;
+    });
+
     task::block_on(async {
         loop {
             let job = job_receiver.recv().await.unwrap();
-            visualization_sender.send(job).await.unwrap();
+            visualization_sender.send(job.clone()).await.unwrap();
+            sqlite_sender.send(job).await.unwrap();
         }
     });
+}
+
+async fn sqlite_writer_task(receiver: Receiver<JobUpdate<'_>>) {
+    let mut conn = SqliteConnection::establish("dev-stratum-observer.sqlite").unwrap();
+    conn.run_pending_migrations(MIGRATIONS).unwrap();
+    loop {
+        let update = receiver.recv().await.unwrap();
+        let v: NewJobUpdate = update.into();
+        diesel::insert_into(job_updates::table)
+            .values(&vec![v])
+            .execute(&mut conn)
+            .expect("Error saving new job update");
+    }
 }
 
 async fn terminal_visualization_task(receiver: Receiver<JobUpdate<'_>>) {
@@ -63,7 +89,7 @@ async fn terminal_visualization_task(receiver: Receiver<JobUpdate<'_>>) {
             let coinbase_script_sig = &cb
                 .input
                 .first()
-                .expect("coinbase should only have one input")
+                .expect("coinbase should have one input")
                 .script_sig;
             let prevhash = j.prev_block_hash();
             let prevhash_colored = colored(prevhash[0], &prevhash.to_string());
