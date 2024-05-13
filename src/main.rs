@@ -77,6 +77,7 @@ async fn terminal_visualization_task(receiver: Receiver<JobUpdate<'_>>) {
         let job = receiver.recv().await.unwrap();
         last_job.insert(job.pool.clone().name, job);
 
+        let mut lines: Vec<(u64, String)> = vec![];
         for (_, j) in last_job.iter() {
             let template_colors: String = j
                 .job
@@ -93,20 +94,34 @@ async fn terminal_visualization_task(receiver: Receiver<JobUpdate<'_>>) {
                 .script_sig;
             let prevhash = j.prev_block_hash();
             let prevhash_colored = colored(prevhash[0], &prevhash.to_string());
-            println!(
-                "{: <18} {:<50} {} {} {:2.8} BTC {:>4}s {:>2}s {:>5} {}",
-                j.pool.name,
-                extract_coinbase_string(coinbase_script_sig),
-                prevhash_colored,
-                bip34_coinbase_block_height(&coinbase_script_sig).unwrap_or_default(),
-                cb.output.iter().map(|o| o.value.to_btc()).sum::<f64>(),
-                j.time_connected_seconds(),
-                j.age(),
-                j.job.clean_jobs,
-                template_colors,
-            );
+            let output_value_f64: f64 = cb.output.iter().map(|o| o.value.to_btc()).sum::<f64>();
+            let output_value_u64: u64 = cb.output.iter().map(|o| o.value.to_sat()).sum::<u64>();
+            lines.push((
+                output_value_u64,
+                format!(
+                    "{: <18} {:<50} {} {} {} {:>4}s {:>2}s {:>5} {}\t{}",
+                    j.pool.name,
+                    extract_coinbase_string(coinbase_script_sig),
+                    prevhash_colored,
+                    bip34_coinbase_block_height(&coinbase_script_sig).unwrap_or_default(),
+                    colored(
+                        (output_value_u64 % 128 as u64) as u8 + 42u8,
+                        &format!("{:2.8} BTC", output_value_f64),
+                    ),
+                    j.time_connected_seconds(),
+                    j.age(),
+                    j.job.clean_jobs,
+                    template_colors,
+                    j.pool.name,
+                ),
+            ));
+
+            lines.sort_by_key(|(output_value, _)| *output_value);
+            for line in lines.iter().rev() {
+                println!("{}", line.1);
+            }
+            println!("\n\n");
         }
-        println!("\n\n");
     }
 }
 
