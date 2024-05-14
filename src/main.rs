@@ -1,5 +1,6 @@
 use crate::schema::job_updates;
 use crate::types::JobUpdate;
+use crate::types::JobUpdateJson;
 use crate::types::NewJobUpdate;
 use crate::utils::{bip34_coinbase_block_height, extract_coinbase_string};
 use async_channel::{unbounded, Receiver};
@@ -49,13 +50,40 @@ fn main() {
         sqlite_writer_task(sqlite_receiver).await;
     });
 
+    let (websocket_sender, websocket_receiver) = unbounded();
+    task::spawn(async move {
+        websocket_sender_task(websocket_receiver).await;
+    });
+
     task::block_on(async {
         loop {
             let job = job_receiver.recv().await.unwrap();
             visualization_sender.send(job.clone()).await.unwrap();
-            sqlite_sender.send(job).await.unwrap();
+            sqlite_sender.send(job.clone()).await.unwrap();
+            websocket_sender.send(job).await.unwrap();
         }
     });
+}
+
+async fn websocket_sender_task(receiver: Receiver<JobUpdate<'static>>) {
+    use std::net::TcpListener;
+    use tungstenite::accept;
+
+    let server = TcpListener::bind("127.0.0.1:9555").unwrap();
+    for stream in server.incoming() {
+        let r = receiver.clone();
+        task::spawn(async move {
+            let mut websocket = accept(stream.unwrap()).unwrap();
+            loop {
+                let job = r.recv().await.unwrap();
+                websocket
+                    .send(tungstenite::Message::Text(
+                        serde_json::to_string::<JobUpdateJson>(&job.into()).unwrap(),
+                    ))
+                    .unwrap();
+            }
+        });
+    }
 }
 
 async fn sqlite_writer_task(receiver: Receiver<JobUpdate<'_>>) {

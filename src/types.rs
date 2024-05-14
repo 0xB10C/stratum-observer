@@ -3,7 +3,7 @@ use crate::utils::{bip34_coinbase_block_height, encode_hex, extract_coinbase_str
 use bitcoin::hashes::sha256d::Hash;
 use chrono::prelude::*;
 use diesel::Insertable;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sv1_api::server_to_client;
 use sv1_api::utils::Extranonce;
 
@@ -71,6 +71,49 @@ impl From<JobUpdate<'_>> for NewJobUpdate {
             extranonce1: o.extranonce1.as_ref().to_vec(),
             extranonce2_size: o.extranonce2_size as i32,
             clean_jobs: o.job.clean_jobs,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct JobUpdateJson {
+    pool_name: String,
+    prev_hash: String,
+    coinbase_tag: String,
+    height: u64,
+    coinbase_sum: u64,
+    job_timestamp: i64,
+    merkle_branches: Vec<String>,
+    clean_jobs: bool,
+}
+
+impl From<JobUpdate<'_>> for JobUpdateJson {
+    fn from(o: JobUpdate<'_>) -> Self {
+        let cb = o.clone().coinbase();
+        let coinbase_script_sig = &cb
+            .input
+            .first()
+            .expect("coinbase should have an input")
+            .script_sig;
+
+        JobUpdateJson {
+            pool_name: o.pool.clone().name,
+            prev_hash: o.prev_block_hash().to_string(),
+            coinbase_tag: extract_coinbase_string(coinbase_script_sig),
+            height: (bip34_coinbase_block_height(&coinbase_script_sig).unwrap_or_default() as u64),
+            coinbase_sum: cb
+                .output
+                .iter()
+                .map(|o| o.value.to_sat() as u64)
+                .sum::<u64>(),
+            job_timestamp: o.timestamp.timestamp(),
+            clean_jobs: o.job.clean_jobs,
+            merkle_branches: o
+                .job
+                .merkle_branch
+                .iter()
+                .map(|b| encode_hex(b.as_ref()))
+                .collect(),
         }
     }
 }

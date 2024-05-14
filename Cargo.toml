@@ -18,3 +18,4 @@ bitcoin = "0.32.0"
 chrono = "0.4.38"
 diesel = { version = "2.1.6", features = ["sqlite", "chrono"] }
 diesel_migrations = { version = "2.1.0", features = ["sqlite"] }
+tungstenite = "0.21.0"
