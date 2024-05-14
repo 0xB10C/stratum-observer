@@ -24,7 +24,10 @@ use sv1_api::{
 };
 
 const USER_AGENT: &str = "stratum-observer";
+/// The default no-job timeout in seconds.
 const STRATUM_JOB_TIMEOUT_SECONDS: u64 = 60;
+/// The default max lifetime of a connection to a stratum server.
+const STRATUM_CONNECTION_MAX_LIFETIME_SECONDS: u32 = 590; // just below 10 minutes as some pools disconnect after 10 minutes
 
 fn extranonce_from_hex<'a>(hex: &str) -> Extranonce<'a> {
     let data = utils::decode_hex(hex).unwrap();
@@ -159,21 +162,27 @@ impl<'a> Client<'static> {
                 if let Some(mut self_) = cloned.try_lock() {
                     let incoming = self_.receiver_incoming.try_recv();
                     self_.parse_message(incoming).await;
-                    if let Some(max_lifetime) = self_.pool.max_lifetime {
-                        let duration_connected = Utc::now() - self_.time_connected;
-                        if duration_connected > TimeDelta::seconds(max_lifetime.into())
-                            && self_.is_alive
-                        {
-                            debug!(
-                                "Closing connection to {} as the connection is {:?} old (max_lifetime={}s)",
-                                self_.pool.name, duration_connected, max_lifetime,
-                            );
-                            self_.is_alive = false;
-                            arc_stream_parse_msg
-                                .shutdown(Shutdown::Both)
-                                .expect("shutdown call failed");
-                        }
+
+                    // check connection age, disconnect if connection too old
+                    let duration_connected = Utc::now() - self_.time_connected;
+                    let max_lifetime: u32 = self_
+                        .pool
+                        .max_lifetime
+                        .unwrap_or(STRATUM_CONNECTION_MAX_LIFETIME_SECONDS);
+                    if duration_connected > TimeDelta::seconds(max_lifetime.into())
+                        && self_.is_alive
+                    {
+                        debug!(
+                            "Closing connection to {} as the connection is {:?} old (max_lifetime={}s)",
+                            self_.pool.name, duration_connected, max_lifetime,
+                        );
+                        self_.is_alive = false;
+                        arc_stream_parse_msg
+                            .shutdown(Shutdown::Both)
+                            .expect("shutdown call failed");
                     }
+
+                    // check last job time, disconnect if too old
                     if let Some(time_last_notify) = self_.time_last_notify {
                         if time_last_notify.elapsed()
                             > Duration::from_secs(STRATUM_JOB_TIMEOUT_SECONDS)
