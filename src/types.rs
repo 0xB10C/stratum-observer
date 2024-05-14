@@ -83,6 +83,9 @@ pub struct JobUpdateJson {
     height: u64,
     coinbase_sum: u64,
     job_timestamp: i64,
+    header_version: u32,
+    header_time: u32,
+    header_bits: u32,
     merkle_branches: Vec<String>,
     clean_jobs: bool,
 }
@@ -107,6 +110,9 @@ impl From<JobUpdate<'_>> for JobUpdateJson {
                 .map(|o| o.value.to_sat() as u64)
                 .sum::<u64>(),
             job_timestamp: o.timestamp.timestamp(),
+            header_version: o.job.version.0,
+            header_bits: o.job.bits.0,
+            header_time: o.job.time.0,
             clean_jobs: o.job.clean_jobs,
             merkle_branches: o
                 .job
