@@ -3,6 +3,7 @@ use crate::types::JobUpdate;
 use crate::types::JobUpdateJson;
 use crate::types::NewJobUpdate;
 use crate::utils::{bip34_coinbase_block_height, extract_coinbase_string};
+use async_broadcast::broadcast;
 use async_channel::{unbounded, Receiver};
 use async_std::task;
 use client::{initialize_client, Client};
@@ -10,7 +11,10 @@ use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use env_logger::Env;
+use log::{debug, error, warn};
 use std::collections::BTreeMap;
+use std::net::TcpListener;
+use tungstenite::accept;
 
 mod client;
 mod config;
@@ -58,7 +62,7 @@ fn main() {
     task::block_on(async {
         loop {
             let job = job_receiver.recv().await.unwrap();
-            visualization_sender.send(job.clone()).await.unwrap();
+            //visualization_sender.send(job.clone()).await.unwrap();
             sqlite_sender.send(job.clone()).await.unwrap();
             websocket_sender.send(job).await.unwrap();
         }
@@ -66,23 +70,58 @@ fn main() {
 }
 
 async fn websocket_sender_task(receiver: Receiver<JobUpdate<'static>>) {
-    use std::net::TcpListener;
-    use tungstenite::accept;
-
     let server = TcpListener::bind("127.0.0.1:9555").unwrap();
-    for stream in server.incoming() {
-        let r = receiver.clone();
-        task::spawn(async move {
-            let mut websocket = accept(stream.unwrap()).unwrap();
-            loop {
-                let job = r.recv().await.unwrap();
-                websocket
-                    .send(tungstenite::Message::Text(
-                        serde_json::to_string::<JobUpdateJson>(&job.into()).unwrap(),
-                    ))
-                    .unwrap();
+
+    // a broadcast channel is used to fan-out the jobs to all websocket
+    // subscribers. One 'inactive' receiver is just used for cloning new
+    // broadcast receivers. The sender overflows to make sure we allways
+    // empty the websocket_receiver channel, even when no active websocket
+    // connections are avaliable.
+    let (mut sender, broadcast_receiver) = broadcast(10);
+    let inactive_broadcast_receiver = broadcast_receiver.deactivate();
+    sender.set_overflow(true);
+
+    task::spawn(async move {
+        loop {
+            let job = receiver.recv().await.unwrap();
+            if sender.receiver_count() > 0 {
+                sender.broadcast(job.clone()).await.unwrap();
+                debug!(
+                    "broadcast new job by '{}' to {} websocket thread(s)",
+                    job.pool.name,
+                    sender.receiver_count()
+                );
             }
-        });
+        }
+    });
+
+    for stream in server.incoming() {
+        match stream {
+            Ok(stream) => {
+                let mut r = inactive_broadcast_receiver.clone().activate();
+                task::spawn(async move {
+                    let mut websocket = accept(stream).unwrap(); // TODO: match
+                    debug!(
+                        "Accepted new websocket connection: connections={}",
+                        r.receiver_count()
+                    );
+                    loop {
+                        let job = r.recv().await.unwrap();
+                        if let Err(e) = websocket.send(tungstenite::Message::Text(
+                            serde_json::to_string::<JobUpdateJson>(&job.clone().into()).unwrap(),
+                        )) {
+                            debug!("Could not send '{}' job update to websocket: {}. Connection probably closed.", job.pool.name, e);
+                            websocket.close(None);
+                            websocket.flush();
+                            break;
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                warn!("Failed to accept incomming TCP connection: {}", e);
+            }
+        }
     }
 }
 
