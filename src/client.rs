@@ -51,13 +51,11 @@ pub struct Client<'a> {
     receiver_incoming: Receiver<String>,
     sender_outgoing: Sender<String>,
     sender_shutdown: Sender<bool>,
+    shutting_down: bool,
 }
 
 impl<'a> Client<'static> {
-    pub async fn run(
-        pool: &Pool,
-        job_sender: Sender<JobUpdate<'static>>,
-    ) -> Arc<Mutex<Client<'static>>> {
+    pub async fn run(pool: &Pool, job_sender: Sender<JobUpdate<'static>>) {
         // TODO: handle errors
         let socket = pool.endpoint.to_socket_addrs().unwrap().next().unwrap();
 
@@ -100,6 +98,7 @@ impl<'a> Client<'static> {
             receiver_incoming,
             sender_outgoing,
             sender_shutdown,
+            shutting_down: false,
         };
 
         let client = Arc::new(Mutex::new(client));
@@ -114,7 +113,7 @@ impl<'a> Client<'static> {
             }
             if let Some(mut self_) = cloned.try_lock() {
                 debug!("Stream with '{}' closed", self_.pool.name);
-                self_.close().await;
+                self_.shutdown().await;
             }
         });
 
@@ -135,7 +134,7 @@ impl<'a> Client<'static> {
                     }
                 }
             }
-            warn!(
+            debug!(
                 "Closed outbound send task to '{}'.",
                 outbound_pool_clone.name
             );
@@ -160,7 +159,7 @@ impl<'a> Client<'static> {
                             "Closing connection to {} as the connection is {:?} old (max_lifetime={}s)",
                             self_.pool.name, duration_connected, max_lifetime,
                         );
-                        self_.close().await;
+                        self_.shutdown().await;
                         break;
                     }
 
@@ -173,7 +172,7 @@ impl<'a> Client<'static> {
                                 "No notify from {} in more than {}s: disconnecting...",
                                 self_.pool.name, STRATUM_JOB_TIMEOUT_SECONDS
                             );
-                            self_.close().await;
+                            self_.shutdown().await;
                             break;
                         }
                     }
@@ -185,7 +184,6 @@ impl<'a> Client<'static> {
         });
 
         // initialize client loop
-        // FIXME: let cloned = client.clone();
         loop {
             let mut client_ = client.lock().await;
             match client_.status {
@@ -201,13 +199,13 @@ impl<'a> Client<'static> {
         }
 
         // Wait-for-shutdown loop
-        // FIXME: let arc_stream_shutdown = arc_stream.clone();
         loop {
             match receiver_shutdown.recv().await {
                 Ok(_) => {
                     arc_stream
                         .shutdown(Shutdown::Both)
                         .expect("shutdown call failed");
+                    return;
                 }
                 Err(e) => {
                     panic!("Shutdown receiver closed before receiving shutdown: {}", e)
@@ -268,13 +266,16 @@ impl<'a> Client<'static> {
         self.status = ClientStatus::Configured;
     }
 
-    pub async fn close(&mut self) {
-        self.sender_shutdown
-            .send(true)
-            .await
-            .expect("Could not send shutdown");
-        self.sender_outgoing.close();
-        self.receiver_incoming.close();
+    pub async fn shutdown(&mut self) {
+        if !self.shutting_down {
+            self.shutting_down = true;
+            self.sender_outgoing.close();
+            self.receiver_incoming.close();
+            self.sender_shutdown
+                .send(true)
+                .await
+                .expect("Could not send shutdown");
+        }
     }
 }
 
