@@ -12,15 +12,13 @@
       <thead>
         <tr>
           <td>name</td>
-          <td>coinbase tag</td>
           <td>height</td>
           <td>prev_hash</td>
           <td>age</td>
-          <td>clear</td>
           <td>output sum</td>
           <td>merkle-branches</td>
-          <td>name</td>
-          <td>time offset</td>
+          <td>coinbase tag</td>
+          <td>clear</td>
         </tr>
       </thead>
       <tbody>
@@ -31,16 +29,13 @@
     <template id="job_row">
       <tr>
         <td>name</td>
-        <td><!--coinbase tag--></td>
         <td>height</td>
         <td style="font-family: monospace;"><!--prev_hash--></td>
         <td><!--age--></td>
-        <td>clear</td>
         <td>output sum</td>
         <td><!--merkle-branches--></td>
-        <td><!--name--></td>
-        <td><!--name--></td>
-        <td><!--name--></td>
+        <td><!--coinbase tag--></td>
+        <td>clear</td>
       </tr>
     </template>
     
@@ -67,56 +62,65 @@
           let td = clone.querySelectorAll("td");
           td[0].textContent = job.pool_name;
 
-          { // coinbase tag
-            const span = document.createElement('span')
-            span.classList.add("badge", "bg-light", "text-dark");
-            span.textContent = job.coinbase_tag;
-            td[1].appendChild(span);
-          }
           
-          td[2].textContent = job.height;
+          td[1].textContent = job.height;
 
           // prev hash
-          const aPrevHash = document.createElement('a')
-          const span = document.createElement('span')
-          span.textContent = ".." + job.prev_hash.substring(56, 64);
-          span.style.background = "#" + job.prev_hash.substring(58, 64);
-          aPrevHash.append(span)
-          aPrevHash.setAttribute("href", "https://mempool.space/block/" + job.prev_hash)
-          td[3].appendChild(aPrevHash);
+          {
+            const a = document.createElement('a')
+            const span = document.createElement('span')
+            span.textContent = "…" + job.prev_hash.substring(56, 64);
+            span.style["mix-blend-mode"] = "difference";
+            span.style.color = "white";
+            a.append(span)
+            a.style["text-decoration"] = "none";
+            a.setAttribute("href", "https://mempool.space/block/" + job.prev_hash)
+            a.style.background = "#" + job.prev_hash.substring(58, 64);
+            td[2].appendChild(a);
+          }
           
           const spanTimestamp = document.createElement('span')
           spanTimestamp.classList.add("relativeTimestamp")
           spanTimestamp.setAttribute("data-timestamp", job.job_timestamp)
           spanTimestamp.textContent = ((Date.now() - job.job_timestamp*1000)/1000).toFixed(0) + "s"
           if (((Date.now() - job.job_timestamp*1000)/1000) > 30) {
-            td[4].style.background = "red";
+            td[3].style.background = "red";
           }
-          td[4].appendChild(spanTimestamp);
+          td[3].appendChild(spanTimestamp);
           
-          td[5].textContent = job.clean_jobs;
-          if (job.clean_jobs) {
-            td[5].style.background = "red";
-          }
-          td[6].textContent = (job.coinbase_sum / 100_000_000).toFixed(8) + " BTC";
+          td[4].textContent = (job.coinbase_sum / 100_000_000).toFixed(8) + " BTC";
           
           // merkle branches
           for (const [index, element] of job.merkle_branches.entries()) {
             const span = document.createElement('span')
             if (index == 0) {
-              const tx1Link = document.createElement('a')
-              tx1Link.textContent = "tx1";
-              tx1Link.setAttribute("href", "https://mempool.space/tx/" + reverseBytes(element));
-              span.appendChild(tx1Link);
+              const a = document.createElement('a')
+              a.textContent = "tx1";
+              a.style["mix-blend-mode"] = "difference";
+              a.style["text-decoration"] = "none";
+              a.style.color = "white";
+              a.setAttribute("href", "https://mempool.space/tx/" + reverseBytes(element));
+              span.appendChild(a);
             } else {
               span.textContent = "____";
             }
             span.style.background = "#" + element.substring(0, 6);
-            td[7].appendChild(span)
+            td[5].appendChild(span)
+          }
+
+          { // coinbase tag
+            const span = document.createElement('span')
+            span.classList.add("badge", "bg-light", "text-dark");
+            span.textContent = job.coinbase_tag;
+            td[6].appendChild(span);
+          }
+
+          td[7].textContent = job.clean_jobs;
+          if (job.clean_jobs) {
+            td[7].style.background = "red";
           }
           
-          td[8].textContent = job.pool_name;
-          td[9].textContent = job.job_timestamp - job.header_time + "s";
+          // td[9].textContent = job.job_timestamp - job.header_time + "s";
           rows.push({"cb_sum": job.coinbase_sum, "job_ts": job.job_timestamp, "element": clone});
         }
         rows.sort((a, b) => {
