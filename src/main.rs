@@ -100,14 +100,21 @@ async fn websocket_sender_task(receiver: Receiver<JobUpdate<'static>>) {
                             );
                             loop {
                                 let job = r.recv().await.unwrap();
-                                if let Err(e) = websocket.send(tungstenite::Message::Text(
-                                    serde_json::to_string::<JobUpdateJson>(&job.clone().into())
-                                        .unwrap(),
-                                )) {
-                                    debug!("Could not send '{}' job update to websocket: {}. Connection probably closed.", job.pool.name, e);
-                                    websocket.close(None);
-                                    websocket.flush();
-                                    break;
+                                match serde_json::to_string::<JobUpdateJson>(&job.clone().into()) {
+                                    Ok(msg) => {
+                                        if let Err(e) = websocket.send(tungstenite::Message::Text(msg))
+                                        {
+                                            debug!("Could not send '{}' job update to websocket: {}. Connection probably closed.", job.pool.name, e);
+                                            // Try our best to close and flush the websocket. If we can't,
+                                            // we can't..
+                                            let _ = websocket.close(None);
+                                            let _ = websocket.flush();
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("Could not serialize JobUpdateJson to JSON: {}", e)
+                                    }
                                 }
                             }
                         }
