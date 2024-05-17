@@ -108,8 +108,15 @@ impl<'a> Client<'static> {
         task::spawn(async move {
             let mut messages = BufReader::new(&*reader).lines();
             while let Some(message) = messages.next().await {
-                let message = message.unwrap(); // TODO
-                sender_incoming.send(message).await.unwrap(); // TODO
+                match message {
+                    Ok(msg) => {
+                        sender_incoming.send(msg).await.unwrap(); // TODO
+                    }
+                    Err(e) => {
+                        warn!("could not read incoming message: {}", e);
+                        break;
+                    }
+                }
             }
             if let Some(mut self_) = cloned.try_lock() {
                 debug!("Stream with '{}' closed", self_.pool.name);
@@ -220,9 +227,20 @@ impl<'a> Client<'static> {
     ) {
         if let Ok(line) = incoming_message {
             debug!("recv from {}: {}", self.pool.name, line);
-            let message: json_rpc::Message = serde_json::from_str(&line).unwrap();
-            self.handle_message(message).unwrap();
-        };
+            match serde_json::from_str(&line) {
+                Ok(msg) => {
+                    if let Err(e) = self.handle_message(msg) {
+                        warn!(
+                            "could not handle '{}' message (ignoring): {}",
+                            self.pool.name, e
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!("could not parse message: {} - msg={}", e, line);
+                }
+            }
+        }
     }
 
     async fn send_message(&mut self, msg: &json_rpc::Message) {
@@ -231,6 +249,7 @@ impl<'a> Client<'static> {
         debug!("sending to {}: {}", self.pool.name, content);
         if let Err(e) = self.sender_outgoing.send(format!("{}\n", content)).await {
             warn!("could not send message to '{}': {}", self.pool.name, e);
+            self.shutdown().await;
         } else {
             self.message_id += 1;
         }
