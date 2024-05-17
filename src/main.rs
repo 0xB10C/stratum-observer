@@ -5,7 +5,7 @@ use crate::types::NewJobUpdate;
 use async_broadcast::broadcast;
 use async_channel::{unbounded, Receiver};
 use async_std::task;
-use client::{initialize_client, Client};
+use client::Client;
 use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
@@ -36,8 +36,7 @@ fn main() {
         task::spawn(async move {
             // reopen clients if a client looses or closes the connection
             loop {
-                let client = Client::new(&pool, js.clone()).await;
-                initialize_client(client).await;
+                Client::run(&pool, js.clone()).await;
             }
         });
     }
@@ -102,7 +101,8 @@ async fn websocket_sender_task(receiver: Receiver<JobUpdate<'static>>) {
                                 let job = r.recv().await.unwrap();
                                 match serde_json::to_string::<JobUpdateJson>(&job.clone().into()) {
                                     Ok(msg) => {
-                                        if let Err(e) = websocket.send(tungstenite::Message::Text(msg))
+                                        if let Err(e) =
+                                            websocket.send(tungstenite::Message::Text(msg))
                                         {
                                             debug!("Could not send '{}' job update to websocket: {}. Connection probably closed.", job.pool.name, e);
                                             // Try our best to close and flush the websocket. If we can't,

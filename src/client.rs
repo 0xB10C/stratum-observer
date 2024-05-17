@@ -50,36 +50,11 @@ pub struct Client<'a> {
     authorized: Vec<String>,
     receiver_incoming: Receiver<String>,
     sender_outgoing: Sender<String>,
-    is_alive: bool,
-}
-
-pub async fn initialize_client(client: Arc<Mutex<Client<'static>>>) {
-    loop {
-        let mut client_ = client.lock().await;
-        match client_.status {
-            ClientStatus::Init => client_.send_configure().await,
-            ClientStatus::Configured => client_.send_subscribe().await,
-            ClientStatus::Subscribed => {
-                client_.send_authorize().await;
-                break;
-            }
-        }
-        drop(client_);
-        task::sleep(Duration::from_secs(1)).await;
-    }
-    task::sleep(Duration::from_secs(1)).await;
-    loop {
-        task::sleep(Duration::from_secs(1)).await;
-        let client_ = client.lock().await;
-        if !client_.is_alive {
-            debug!("Shutdown client for pool {}", client_.pool.name);
-            break;
-        }
-    }
+    sender_shutdown: Sender<bool>,
 }
 
 impl<'a> Client<'static> {
-    pub async fn new(
+    pub async fn run(
         pool: &Pool,
         job_sender: Sender<JobUpdate<'static>>,
     ) -> Arc<Mutex<Client<'static>>> {
@@ -93,8 +68,9 @@ impl<'a> Client<'static> {
                     break st;
                 }
                 Err(_) => {
-                    info!("Pool '{}' unreachable...", pool.name);
+                    warn!("Pool '{}' unreachable...", pool.name);
                     task::sleep(Duration::from_secs(2)).await;
+                    // TODO: backoff
                     continue;
                 }
             }
@@ -103,9 +79,9 @@ impl<'a> Client<'static> {
         let arc_stream = Arc::new(stream);
 
         let (reader, writer) = (arc_stream.clone(), arc_stream.clone());
-
         let (sender_incoming, receiver_incoming) = bounded(10);
         let (sender_outgoing, receiver_outgoing) = bounded(10);
+        let (sender_shutdown, receiver_shutdown) = bounded(1);
 
         let client = Client {
             pool: pool.clone(),
@@ -123,39 +99,49 @@ impl<'a> Client<'static> {
             authorized: vec![],
             receiver_incoming,
             sender_outgoing,
-            is_alive: true,
+            sender_shutdown,
         };
 
         let client = Arc::new(Mutex::new(client));
 
         // Inbound message receive task
         let cloned = client.clone();
-        let arc_stream_inbound = arc_stream.clone();
         task::spawn(async move {
             let mut messages = BufReader::new(&*reader).lines();
             while let Some(message) = messages.next().await {
-                let message = message.unwrap();
-                sender_incoming.send(message).await.unwrap();
+                let message = message.unwrap(); // TODO
+                sender_incoming.send(message).await.unwrap(); // TODO
             }
             if let Some(mut self_) = cloned.try_lock() {
                 debug!("Stream with '{}' closed", self_.pool.name);
-                self_.is_alive = false;
-                arc_stream_inbound
-                    .shutdown(Shutdown::Both)
-                    .expect("shutdown call failed");
+                self_.close().await;
             }
         });
 
         // Outbound message send task
+        let outbound_pool_clone = pool.clone();
         task::spawn(async move {
             loop {
-                let message: String = receiver_outgoing.recv().await.unwrap();
-                (&*writer).write_all(message.as_bytes()).await.unwrap();
+                match receiver_outgoing.recv().await {
+                    Ok(message) => {
+                        if let Err(e) = (&*writer).write_all(message.as_bytes()).await {
+                            debug!("Failed to send stratum message to '{}'. Stopping outbound message send task: {}", outbound_pool_clone.name, e);
+                            break;
+                        };
+                    }
+                    Err(e) => {
+                        debug!("Outbound message receiver to '{}' is closed. Stopping outbound message send task: {}", outbound_pool_clone.name, e);
+                        break;
+                    }
+                }
             }
+            warn!(
+                "Closed outbound send task to '{}'.",
+                outbound_pool_clone.name
+            );
         });
 
         // Message parsing and processing task
-        let arc_stream_parse_msg = arc_stream.clone();
         let cloned = client.clone();
         task::spawn(async move {
             loop {
@@ -169,33 +155,26 @@ impl<'a> Client<'static> {
                         .pool
                         .max_lifetime
                         .unwrap_or(STRATUM_CONNECTION_MAX_LIFETIME_SECONDS);
-                    if duration_connected > TimeDelta::seconds(max_lifetime.into())
-                        && self_.is_alive
-                    {
+                    if duration_connected > TimeDelta::seconds(max_lifetime.into()) {
                         debug!(
                             "Closing connection to {} as the connection is {:?} old (max_lifetime={}s)",
                             self_.pool.name, duration_connected, max_lifetime,
                         );
-                        self_.is_alive = false;
-                        arc_stream_parse_msg
-                            .shutdown(Shutdown::Both)
-                            .expect("shutdown call failed");
+                        self_.close().await;
+                        break;
                     }
 
                     // check last job time, disconnect if too old
                     if let Some(time_last_notify) = self_.time_last_notify {
                         if time_last_notify.elapsed()
                             > Duration::from_secs(STRATUM_JOB_TIMEOUT_SECONDS)
-                            && self_.is_alive
                         {
                             warn!(
                                 "No notify from {} in more than {}s: disconnecting...",
                                 self_.pool.name, STRATUM_JOB_TIMEOUT_SECONDS
                             );
-                            self_.is_alive = false;
-                            arc_stream_parse_msg
-                                .shutdown(Shutdown::Both)
-                                .expect("shutdown call failed");
+                            self_.close().await;
+                            break;
                         }
                     }
                 }
@@ -205,7 +184,36 @@ impl<'a> Client<'static> {
             }
         });
 
-        client
+        // initialize client loop
+        // FIXME: let cloned = client.clone();
+        loop {
+            let mut client_ = client.lock().await;
+            match client_.status {
+                ClientStatus::Init => client_.send_configure().await,
+                ClientStatus::Configured => client_.send_subscribe().await,
+                ClientStatus::Subscribed => {
+                    client_.send_authorize().await;
+                    break;
+                }
+            }
+            drop(client_);
+            task::sleep(Duration::from_secs(1)).await;
+        }
+
+        // Wait-for-shutdown loop
+        // FIXME: let arc_stream_shutdown = arc_stream.clone();
+        loop {
+            match receiver_shutdown.recv().await {
+                Ok(_) => {
+                    arc_stream
+                        .shutdown(Shutdown::Both)
+                        .expect("shutdown call failed");
+                }
+                Err(e) => {
+                    panic!("Shutdown receiver closed before receiving shutdown: {}", e)
+                }
+            }
+        }
     }
 
     async fn parse_message(
@@ -220,14 +228,15 @@ impl<'a> Client<'static> {
     }
 
     async fn send_message(&mut self, msg: &json_rpc::Message) {
-        let msg = format!("{}\n", serde_json::to_string(&msg).unwrap());
-        debug!(
-            "send to {}: {}",
-            self.pool.name,
-            serde_json::to_string(&msg).unwrap()
-        );
-        self.sender_outgoing.send(msg).await.unwrap();
-        self.message_id += 1;
+        let content =
+            serde_json::to_string(&msg).expect("could not serialize message as JSON string");
+        debug!("sending to {}: {}", self.pool.name, content);
+        let msg = format!("{}\n", content);
+        if let Err(e) = self.sender_outgoing.send(format!("{}\n", content)).await {
+            warn!("could not send message to '{}': {}", self.pool.name, e);
+        } else {
+            self.message_id += 1;
+        }
     }
 
     pub async fn send_subscribe(&mut self) {
@@ -258,6 +267,15 @@ impl<'a> Client<'static> {
         // This allows us to support pools that don't respond to the (optional)
         // configure message.
         self.status = ClientStatus::Configured;
+    }
+
+    pub async fn close(&mut self) {
+        self.sender_shutdown
+            .send(true)
+            .await
+            .expect("Could not send shutdown");
+        self.sender_outgoing.close();
+        self.receiver_incoming.close();
     }
 }
 
