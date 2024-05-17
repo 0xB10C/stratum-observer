@@ -231,7 +231,6 @@ impl<'a> Client<'static> {
         let content =
             serde_json::to_string(&msg).expect("could not serialize message as JSON string");
         debug!("sending to {}: {}", self.pool.name, content);
-        let msg = format!("{}\n", content);
         if let Err(e) = self.sender_outgoing.send(format!("{}\n", content)).await {
             warn!("could not send message to '{}': {}", self.pool.name, e);
         } else {
