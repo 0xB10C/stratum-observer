@@ -1,8 +1,10 @@
 use crate::schema::job_updates;
 use crate::utils::{bip34_coinbase_block_height, encode_hex, extract_coinbase_string};
+use bitcoin::consensus::encode::Error as ConsensusError;
 use bitcoin::hashes::sha256d::Hash;
 use chrono::prelude::*;
 use diesel::Insertable;
+use log::debug;
 use serde::{Deserialize, Serialize};
 use sv1_api::server_to_client;
 use sv1_api::utils::Extranonce;
@@ -40,17 +42,10 @@ pub struct NewJobUpdate {
 
 impl From<JobUpdate<'_>> for NewJobUpdate {
     fn from(o: JobUpdate<'_>) -> Self {
-        let cb = o.clone().coinbase();
-        let coinbase_script_sig = &cb
-            .input
-            .first()
-            .expect("coinbase should have an input")
-            .script_sig;
-
+        let coinbase_info = o.coinbase_info();
         NewJobUpdate {
             timestamp: o.timestamp.naive_utc(),
             pool_name: o.pool.name.clone(),
-            coinbase_tag: extract_coinbase_string(coinbase_script_sig),
             prev_hash: o.prev_block_hash().to_string(),
             merkle_branches: o
                 .job
@@ -59,13 +54,10 @@ impl From<JobUpdate<'_>> for NewJobUpdate {
                 .map(|b| encode_hex(b.as_ref()))
                 .collect::<Vec<String>>()
                 .join(":"),
-            height: (bip34_coinbase_block_height(&coinbase_script_sig).unwrap_or_default() as i64),
-            output_sum: cb
-                .output
-                .iter()
-                .map(|o| o.value.to_sat() as i64)
-                .sum::<i64>(),
-            header_version: (o.job.version.0 as i64),
+            coinbase_tag: coinbase_info.tag,
+            height: coinbase_info.height as i64,
+            output_sum: coinbase_info.value_sum as i64,
+            header_version: o.job.version.0 as i64,
             header_bits: o.job.bits.0 as i64,
             header_time: o.job.time.0 as i64,
             extranonce1: o.extranonce1.as_ref().to_vec(),
@@ -80,7 +72,7 @@ pub struct JobUpdateJson {
     pool_name: String,
     prev_hash: String,
     coinbase_tag: String,
-    height: u64,
+    height: u32,
     coinbase_sum: u64,
     job_timestamp: i64,
     header_version: u32,
@@ -92,23 +84,13 @@ pub struct JobUpdateJson {
 
 impl From<JobUpdate<'_>> for JobUpdateJson {
     fn from(o: JobUpdate<'_>) -> Self {
-        let cb = o.clone().coinbase();
-        let coinbase_script_sig = &cb
-            .input
-            .first()
-            .expect("coinbase should have an input")
-            .script_sig;
-
+        let coinbase_info = o.coinbase_info();
         JobUpdateJson {
             pool_name: o.pool.clone().name,
             prev_hash: o.prev_block_hash().to_string(),
-            coinbase_tag: extract_coinbase_string(coinbase_script_sig),
-            height: (bip34_coinbase_block_height(&coinbase_script_sig).unwrap_or_default() as u64),
-            coinbase_sum: cb
-                .output
-                .iter()
-                .map(|o| o.value.to_sat() as u64)
-                .sum::<u64>(),
+            coinbase_tag: coinbase_info.tag,
+            height: coinbase_info.height,
+            coinbase_sum: coinbase_info.value_sum,
             job_timestamp: o.timestamp.timestamp(),
             header_version: o.job.version.0,
             header_bits: o.job.bits.0,
@@ -124,6 +106,12 @@ impl From<JobUpdate<'_>> for JobUpdateJson {
     }
 }
 
+pub struct CoinbaseInfo {
+    pub height: u32,
+    pub tag: String,
+    pub value_sum: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct JobUpdate<'a> {
     /// JobUpdate timestamp
@@ -137,7 +125,7 @@ pub struct JobUpdate<'a> {
 }
 
 impl JobUpdate<'_> {
-    pub fn coinbase(self) -> bitcoin::Transaction {
+    pub fn coinbase(&self) -> Result<bitcoin::Transaction, ConsensusError> {
         let extranonce2 = vec![&0u8; self.extranonce2_size];
         let rawtx: Vec<u8> = self
             .job
@@ -149,7 +137,44 @@ impl JobUpdate<'_> {
             .chain(self.job.coin_base2.as_ref().into_iter())
             .map(|b| *b)
             .collect();
-        bitcoin::consensus::deserialize(&rawtx).unwrap() // TODO: handle errors
+
+        let result = bitcoin::consensus::deserialize(&rawtx);
+        if let Err(ref e) = result {
+            debug!("failed to deserialize coinbase transaction with extranonce1={} extranonce2size={}: {} - rawtx={}",
+                encode_hex(self.extranonce1.as_ref()),
+                self.extranonce2_size,
+                e,
+                encode_hex(&rawtx),
+            );
+        }
+        result
+    }
+
+    pub fn coinbase_info(&self) -> CoinbaseInfo {
+        match self.coinbase() {
+            Ok(coinbase) => {
+                let coinbase_script_sig = &coinbase
+                    .input
+                    .first()
+                    .expect("coinbase should have an input")
+                    .script_sig;
+
+                CoinbaseInfo {
+                    height: bip34_coinbase_block_height(&coinbase_script_sig).unwrap_or_default(),
+                    tag: extract_coinbase_string(coinbase_script_sig),
+                    value_sum: coinbase
+                        .output
+                        .iter()
+                        .map(|o| o.value.to_sat() as u64)
+                        .sum::<u64>(),
+                }
+            }
+            Err(e) => CoinbaseInfo {
+                height: 0,
+                tag: format!("failed to deserialize coinbase: {}", e),
+                value_sum: 0,
+            },
+        }
     }
 
     pub fn prev_block_hash(&self) -> bitcoin::BlockHash {
