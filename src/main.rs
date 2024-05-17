@@ -100,20 +100,27 @@ async fn websocket_sender_task(receiver: Receiver<JobUpdate<'static>>) {
             Ok(stream) => {
                 let mut r = inactive_broadcast_receiver.clone().activate();
                 task::spawn(async move {
-                    let mut websocket = accept(stream).unwrap(); // TODO: match
-                    debug!(
-                        "Accepted new websocket connection: connections={}",
-                        r.receiver_count()
-                    );
-                    loop {
-                        let job = r.recv().await.unwrap();
-                        if let Err(e) = websocket.send(tungstenite::Message::Text(
-                            serde_json::to_string::<JobUpdateJson>(&job.clone().into()).unwrap(),
-                        )) {
-                            debug!("Could not send '{}' job update to websocket: {}. Connection probably closed.", job.pool.name, e);
-                            websocket.close(None);
-                            websocket.flush();
-                            break;
+                    match accept(stream) {
+                        Ok(mut websocket) => {
+                            debug!(
+                                "Accepted new websocket connection: connections={}",
+                                r.receiver_count()
+                            );
+                            loop {
+                                let job = r.recv().await.unwrap();
+                                if let Err(e) = websocket.send(tungstenite::Message::Text(
+                                    serde_json::to_string::<JobUpdateJson>(&job.clone().into())
+                                        .unwrap(),
+                                )) {
+                                    debug!("Could not send '{}' job update to websocket: {}. Connection probably closed.", job.pool.name, e);
+                                    websocket.close(None);
+                                    websocket.flush();
+                                    break;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to open websocket on incoming connection: {}", e);
                         }
                     }
                 });
