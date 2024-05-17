@@ -4,7 +4,7 @@ use bitcoin::consensus::encode::Error as ConsensusError;
 use bitcoin::hashes::sha256d::Hash;
 use chrono::prelude::*;
 use diesel::Insertable;
-use log::debug;
+use log::warn;
 use serde::{Deserialize, Serialize};
 use sv1_api::server_to_client;
 use sv1_api::utils::Extranonce;
@@ -140,7 +140,7 @@ impl JobUpdate<'_> {
 
         let result = bitcoin::consensus::deserialize(&rawtx);
         if let Err(ref e) = result {
-            debug!("failed to deserialize coinbase transaction with extranonce1={} extranonce2size={}: {} - rawtx={}",
+            warn!("failed to deserialize coinbase transaction with extranonce1={} extranonce2size={}: {} - rawtx={}",
                 encode_hex(self.extranonce1.as_ref()),
                 self.extranonce2_size,
                 e,
