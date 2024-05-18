@@ -10,8 +10,9 @@ use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use env_logger::Env;
-use log::{debug, warn};
+use log::{debug, error, info, warn};
 use std::net::TcpListener;
+use std::process::exit;
 use tungstenite::accept;
 
 mod client;
@@ -41,27 +42,74 @@ fn main() {
         });
     }
 
-    let (sqlite_sender, sqlite_receiver) = unbounded();
-    task::spawn(async move {
-        sqlite_writer_task(sqlite_receiver).await;
-    });
+    let enable_database = config.database_path.is_some();
+    let enable_websocket = config.websocket_address.is_some();
+    if !enable_database && !enable_websocket {
+        warn!("Neither database_path nor websocket_address are set: nothing to do");
+        return;
+    }
 
+    let (sqlite_sender, sqlite_receiver) = unbounded();
     let (websocket_sender, websocket_receiver) = unbounded();
-    task::spawn(async move {
-        websocket_sender_task(websocket_receiver).await;
-    });
+
+    // websocket sender task
+    if let Some(ws_addr) = config.websocket_address.clone() {
+        task::spawn(async move {
+            websocket_sender_task(websocket_receiver, &ws_addr).await;
+            exit(1)
+        });
+    } else {
+        websocket_sender.close();
+        websocket_receiver.close();
+    }
+
+    // database writer task
+    if let Some(db_path) = config.database_path.clone() {
+        task::spawn(async move {
+            sqlite_writer_task(sqlite_receiver, &db_path).await;
+            exit(2)
+        });
+    } else {
+        sqlite_sender.close();
+        sqlite_receiver.close();
+    }
 
     task::block_on(async {
         loop {
-            let job = job_receiver.recv().await.unwrap();
-            sqlite_sender.send(job.clone()).await.unwrap();
-            websocket_sender.send(job).await.unwrap();
+            match job_receiver.recv().await {
+                Ok(job) => {
+                    if enable_database {
+                        if let Err(e) = sqlite_sender.send(job.clone()).await {
+                            error!("could not send a job to the sqlite task: {}", e);
+                            break;
+                        }
+                    }
+                    if enable_websocket {
+                        if let Err(e) = websocket_sender.send(job).await {
+                            error!("could not send a job to the websocket task: {}", e);
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("could not receive a new job in main thread: {}", e);
+                    break;
+                }
+            }
         }
+        info!("main loop exited..")
     });
 }
 
-async fn websocket_sender_task(receiver: Receiver<JobUpdate<'static>>) {
-    let server = TcpListener::bind("127.0.0.1:9555").unwrap();
+async fn websocket_sender_task(receiver: Receiver<JobUpdate<'static>>, ws_addr: &str) {
+    info!("Starting websocket server on {}", ws_addr);
+    let server = match TcpListener::bind(ws_addr) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Could not start websocket server on {}: {}", ws_addr, e);
+            return;
+        }
+    };
 
     // a broadcast channel is used to fan-out the jobs to all websocket
     // subscribers. One 'inactive' receiver is just used for cloning new
@@ -131,9 +179,11 @@ async fn websocket_sender_task(receiver: Receiver<JobUpdate<'static>>) {
     }
 }
 
-async fn sqlite_writer_task(receiver: Receiver<JobUpdate<'_>>) {
-    let mut conn = SqliteConnection::establish("dev-stratum-observer.sqlite").unwrap();
-    conn.run_pending_migrations(MIGRATIONS).unwrap();
+async fn sqlite_writer_task(receiver: Receiver<JobUpdate<'_>>, db_path: &str) {
+    info!("Opening database at {}", db_path);
+    let mut conn = SqliteConnection::establish(db_path).unwrap(); // TODO
+    conn.run_pending_migrations(MIGRATIONS).unwrap(); // TODO
+
     loop {
         let update = receiver.recv().await.unwrap();
         let v: NewJobUpdate = update.into();

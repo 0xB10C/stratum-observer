@@ -1,4 +1,0 @@
-database_path = "peer-observer.sqlite"
-pools = [
-  { endpoint = "stratum.example.com:1234", name = "Example Pool", user = "user.worker", password = "empty" },
-]

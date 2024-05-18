@@ -1,0 +1,30 @@
+# stratum observer configuration
+
+## database
+# stratum-observer can record stratum jobs to a sqlite database.
+# Depending on the number of pools you connect to, this database
+# can grow multiple megabyte per day. Make sure to rotate it from
+# time to time.
+#
+# If "database_path" is included and not empty, stratum job recording
+# is enabled.
+database_path = "stratum-observer.sqlite"
+
+## websocket
+# stratum-observer offers a websocket sending out stratum job details
+# as JSON messages. This is used to display jobs on a web interface.
+#
+# If "websocket_address" is included and not empty, websocket job 
+# publishing is enabled. 
+websocket_address = "127.0.0.1:57127"
+
+## pools
+# stratum-observer connects to multiple stratum pools. Currently, only
+# stratum v1 pools are supported. Each list entry should have at least
+# an endpoint (host:port), a unique name, a username. A password field
+# is optional. Additionally, a max_lifetime can be specified in seconds
+# after which the pool connection is dropped and a new connection is
+# opened. 
+pools = [
+  { endpoint = "stratum.example.com:3333", name = "Example Pool", user = "user.worker", password = "45324" },  
+]

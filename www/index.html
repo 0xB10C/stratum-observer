@@ -45,7 +45,7 @@
       const template = document.querySelector("#job_row");
       const jobs = new Map();
       const socket = new WebSocket(
-        "ws://127.0.0.1:9555",
+        "ws://127.0.0.1:57127",
       );
 
       socket.onmessage = (event) => {

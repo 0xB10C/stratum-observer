@@ -269,7 +269,7 @@ impl<'a> Client<'static> {
         if let Ok(authorize) = self.authorize(
             self.message_id,
             self.pool.user.clone(),
-            self.pool.password.clone(),
+            self.pool.password.clone().unwrap_or_default(),
         ) {
             self.send_message(&authorize).await;
         }
@@ -287,13 +287,13 @@ impl<'a> Client<'static> {
 
     pub async fn shutdown(&mut self) {
         if !self.shutting_down {
-            self.shutting_down = true;
             self.sender_outgoing.close();
             self.receiver_incoming.close();
             self.sender_shutdown
                 .send(true)
                 .await
                 .expect("Could not send shutdown");
+            self.shutting_down = true;
         }
     }
 }

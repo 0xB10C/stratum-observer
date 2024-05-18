@@ -9,14 +9,14 @@ use serde::{Deserialize, Serialize};
 use sv1_api::server_to_client;
 use sv1_api::utils::Extranonce;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct Pool {
     //id: u32,
     pub name: String,
     pub endpoint: String,
     //is_v2: bool,
     pub user: String,
-    pub password: String,
+    pub password: Option<String>,
     /// Optional maximum age of the connection in seconds before we close it and open a new one.
     /// If None, keep the connection open for as long as possible.
     pub max_lifetime: Option<u32>,
