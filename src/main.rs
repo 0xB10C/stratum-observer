@@ -4,6 +4,8 @@ use crate::types::JobUpdateJson;
 use crate::types::NewJobUpdate;
 use async_broadcast::broadcast;
 use async_channel::{unbounded, Receiver};
+use async_std::sync::Arc;
+use async_std::sync::RwLock;
 use async_std::task;
 use client::Client;
 use diesel::prelude::*;
@@ -11,6 +13,7 @@ use diesel::sqlite::SqliteConnection;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use env_logger::Env;
 use log::{debug, error, info, warn};
+use std::collections::BTreeMap;
 use std::net::TcpListener;
 use std::process::exit;
 use tungstenite::accept;
@@ -119,10 +122,19 @@ async fn websocket_sender_task(receiver: Receiver<JobUpdate<'static>>, ws_addr: 
     let (mut sender, broadcast_receiver) = broadcast(10);
     let inactive_broadcast_receiver = broadcast_receiver.deactivate();
     sender.set_overflow(true);
+    let recent_jobs: BTreeMap<String, JobUpdate> = BTreeMap::new();
+    let recent_jobs_rwl_arc = Arc::new(RwLock::new(recent_jobs));
 
+    let recent_jobs_write = recent_jobs_rwl_arc.clone();
     task::spawn(async move {
         loop {
             let job = receiver.recv().await.unwrap();
+            {
+                // store the most recent job in a map to be able to send
+                // it to newly connecting clients
+                let mut recent_jobs_ = recent_jobs_write.write().await;
+                recent_jobs_.insert(job.pool.name.clone(), job.clone());
+            }
             if sender.receiver_count() > 0 {
                 sender.broadcast(job.clone()).await.unwrap();
                 debug!(
@@ -138,6 +150,7 @@ async fn websocket_sender_task(receiver: Receiver<JobUpdate<'static>>, ws_addr: 
         match stream {
             Ok(stream) => {
                 let mut r = inactive_broadcast_receiver.clone().activate();
+                let recent_jobs_read = recent_jobs_rwl_arc.clone();
                 task::spawn(async move {
                     match accept(stream) {
                         Ok(mut websocket) => {
@@ -145,8 +158,41 @@ async fn websocket_sender_task(receiver: Receiver<JobUpdate<'static>>, ws_addr: 
                                 "Accepted new websocket connection: connections={}",
                                 r.receiver_count()
                             );
+
+                            // send recent jobs when websocket is opened
+                            {
+                                let recent_jobs_ = recent_jobs_read.read().await;
+                                for job in recent_jobs_.values() {
+                                    // TODO: deduplicate sending jobs into websocket code
+                                    match serde_json::to_string::<JobUpdateJson>(
+                                        &job.clone().into(),
+                                    ) {
+                                        Ok(msg) => {
+                                            if let Err(e) =
+                                                websocket.send(tungstenite::Message::Text(msg))
+                                            {
+                                                debug!("Could not send '{}' job update to websocket: {}. Connection probably closed.", job.pool.name, e);
+                                                // Try our best to close and flush the websocket. If we can't,
+                                                // we can't..
+                                                let _ = websocket.close(None);
+                                                let _ = websocket.flush();
+                                                break;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "Could not serialize JobUpdateJson to JSON: {}",
+                                                e
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // continuesly send new jobs
                             loop {
-                                let job = r.recv().await.unwrap();
+                                let job = r.recv().await.unwrap(); // TODO
+                                                                   // TODO: deduplicate sending jobs into websocket code
                                 match serde_json::to_string::<JobUpdateJson>(&job.clone().into()) {
                                     Ok(msg) => {
                                         if let Err(e) =
