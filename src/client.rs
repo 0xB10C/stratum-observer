@@ -202,6 +202,15 @@ impl<'a> Client<'static> {
                 }
             }
             drop(client_);
+            // If we already know we're shutting down, we can break here
+            // and directly go into the wait-for-shutdown loop.
+            if !receiver_shutdown.is_empty() {
+                warn!(
+                    "Existing shutdown signal during client initialization loop for pool '{}'",
+                    pool.name
+                );
+                break;
+            }
             task::sleep(Duration::from_secs(1)).await;
         }
 
