@@ -110,7 +110,10 @@ impl<'a> Client<'static> {
             while let Some(message) = messages.next().await {
                 match message {
                     Ok(msg) => {
-                        sender_incoming.send(msg).await.unwrap(); // TODO
+                        if let Err(e) = sender_incoming.send(msg).await {
+                            debug!("Could not send received message into processing channel: {}", e);
+                            break;
+                        }
                     }
                     Err(e) => {
                         warn!("could not read incoming message: {}", e);
