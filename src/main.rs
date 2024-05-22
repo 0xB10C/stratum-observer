@@ -26,7 +26,8 @@ mod utils;
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations/");
 
-fn main() {
+#[async_std::main]
+async fn main() {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     let config = match config::load_config() {
         Ok(c) => c,
@@ -38,7 +39,8 @@ fn main() {
     for pool in config.pools.clone() {
         let js = job_sender.clone();
         task::spawn(async move {
-            // reopen clients if a client looses or closes the connection
+            debug!("Spawned task for pool: '{}'", pool.name);
+            // reopen the connection when a client or we close the connection
             loop {
                 Client::run(&pool, js.clone()).await;
             }
@@ -49,7 +51,7 @@ fn main() {
     let enable_websocket = config.websocket_address.is_some();
     if !enable_database && !enable_websocket {
         warn!("Neither database_path nor websocket_address are set: nothing to do");
-        return;
+        exit(3)
     }
 
     let (sqlite_sender, sqlite_receiver) = unbounded();
@@ -77,7 +79,9 @@ fn main() {
         sqlite_receiver.close();
     }
 
-    task::block_on(async {
+    // main task
+    // handles new jobs
+    task::spawn(async move {
         loop {
             match job_receiver.recv().await {
                 Ok(job) => {
@@ -101,7 +105,8 @@ fn main() {
             }
         }
         info!("main loop exited..")
-    });
+    })
+    .await;
 }
 
 async fn websocket_sender_task(receiver: Receiver<JobUpdate<'static>>, ws_addr: &str) {
