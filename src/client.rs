@@ -111,7 +111,10 @@ impl<'a> Client<'static> {
                 match message {
                     Ok(msg) => {
                         if let Err(e) = sender_incoming.send(msg).await {
-                            debug!("Could not send received message into processing channel: {}", e);
+                            debug!(
+                                "Could not send received message into processing channel: {}",
+                                e
+                            );
                             break;
                         }
                     }
