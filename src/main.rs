@@ -196,8 +196,17 @@ async fn websocket_sender_task(receiver: Receiver<JobUpdate<'static>>, ws_addr: 
 
                             // continuesly send new jobs
                             loop {
-                                let job = r.recv().await.unwrap(); // TODO
-                                                                   // TODO: deduplicate sending jobs into websocket code
+                                let job = match r.recv().await {
+                                    Ok(j) => j,
+                                    Err(e) => {
+                                        warn!(
+                                            "Could not receive broadcast-job for websocket: {}",
+                                            e
+                                        );
+                                        break;
+                                    }
+                                };
+                                // TODO: deduplicate sending jobs into websocket code
                                 match serde_json::to_string::<JobUpdateJson>(&job.clone().into()) {
                                     Ok(msg) => {
                                         if let Err(e) =
@@ -206,8 +215,6 @@ async fn websocket_sender_task(receiver: Receiver<JobUpdate<'static>>, ws_addr: 
                                             debug!("Could not send '{}' job update to websocket: {}. Connection probably closed.", job.pool.name, e);
                                             // Try our best to close and flush the websocket. If we can't,
                                             // we can't..
-                                            let _ = websocket.close(None);
-                                            let _ = websocket.flush();
                                             break;
                                         }
                                     }
@@ -216,6 +223,8 @@ async fn websocket_sender_task(receiver: Receiver<JobUpdate<'static>>, ws_addr: 
                                     }
                                 }
                             }
+                            let _ = websocket.close(None);
+                            let _ = websocket.flush();
                         }
                         Err(e) => {
                             warn!("Failed to open websocket on incoming connection: {}", e);
