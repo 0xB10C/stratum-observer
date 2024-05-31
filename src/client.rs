@@ -224,13 +224,13 @@ impl<'a> Client<'static> {
         loop {
             match receiver_shutdown.recv().await {
                 Ok(_) => {
-                    arc_stream
-                        .shutdown(Shutdown::Both)
-                        .expect("shutdown call failed");
+                    // Try to shut down the stream. On errors, do nothing - just terminate this client (and open a new one).
+                    let _ = arc_stream.shutdown(Shutdown::Both);
                     return;
                 }
                 Err(e) => {
-                    panic!("Shutdown receiver closed before receiving shutdown: {}", e)
+                    error!("Shutdown receiver closed before receiving shutdown: {}", e);
+                    return;
                 }
             }
         }
