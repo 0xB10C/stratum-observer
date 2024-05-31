@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::net::TcpListener;
 use std::process::exit;
 use tungstenite::accept;
+use std::time::Duration;
 
 mod client;
 mod config;
@@ -56,6 +57,7 @@ async fn main() {
 
     let (sqlite_sender, sqlite_receiver) = unbounded();
     let (websocket_sender, websocket_receiver) = unbounded();
+    let (smd_sender, smd_receiver) = unbounded();
 
     // websocket sender task
     if let Some(ws_addr) = config.websocket_address.clone() {
@@ -78,6 +80,12 @@ async fn main() {
         sqlite_sender.close();
         sqlite_receiver.close();
     }
+    
+    // selfish mining detection task
+    task::spawn(async move {
+        selfish_mining_detection_task(smd_receiver).await;
+        exit(4)
+    });
 
     // main task
     // handles new jobs
@@ -92,10 +100,15 @@ async fn main() {
                         }
                     }
                     if enable_websocket {
-                        if let Err(e) = websocket_sender.send(job).await {
+                        if let Err(e) = websocket_sender.send(job.clone()).await {
                             error!("could not send a job to the websocket task: {}", e);
                             break;
                         }
+                    }
+                    // TODO: enable smd 
+                    if let Err(e) = smd_sender.send(job).await {
+                        error!("could not send a job to the selfish mining task: {}", e);
+                        break;
                     }
                 }
                 Err(e) => {
@@ -242,5 +255,195 @@ async fn sqlite_writer_task(receiver: Receiver<JobUpdate<'_>>, db_path: &str) {
             .values(&vec![v])
             .execute(&mut conn)
             .expect("Error saving new job update");
+    }
+}
+
+async fn selfish_mining_detection_task(receiver: Receiver<JobUpdate<'static>>) {
+    info!("Starting selfish mining detection task");
+
+    // we only want to consider jobs that are older than `min_job_age` seconds
+    // to make sure we don't consider someone who just found a block as selfish
+    // mining when other pools haven't had a chance to learn about it.
+    // Assumption: The majority of pools should switch to a new block in 5 seconds.
+    let min_job_age: i64 = 5;
+
+    let recent_jobs: BTreeMap<String, JobUpdate> = BTreeMap::new();
+    let recent_jobs_rwl_arc = Arc::new(RwLock::new(recent_jobs));
+
+    let recent_jobs_write = recent_jobs_rwl_arc.clone();
+    task::spawn(async move {
+        loop {
+            let job = receiver.recv().await.unwrap();
+            {
+                let mut recent_jobs_ = recent_jobs_write.write().await;
+                recent_jobs_.insert(job.pool.name.clone(), job.clone());
+            }
+        }
+    });
+
+    let recent_jobs_read = recent_jobs_rwl_arc.clone();
+    loop {
+        task::sleep(Duration::from_secs(2)).await;
+        {        
+            let recent_jobs_ = recent_jobs_read.read().await;
+            let mut max_height = 0;
+            let mut height_occurences: BTreeMap<u32, u16> = BTreeMap::new();
+            for height in recent_jobs_.values().filter(|job| job.age() > min_job_age).map(|job_update| job_update.coinbase_info().height) {
+                if height > max_height {
+                    max_height = height;
+                }
+                height_occurences.entry(height).and_modify(|occurences| {*occurences += 1} ).or_insert(1);
+            }
+        
+            println!("occurences={:?}, max={}", height_occurences, max_height);
+            // find out what the majority of pools mines on
+            let mut majority_size = 0;
+            let mut majority_height = 0;
+            for (height, size) in height_occurences.iter() {
+                if *size > majority_size {
+                    majority_height = *height;
+                    majority_size = *size;
+                }
+            }
+            if majority_height < max_height {
+                warn!("max_height={} while majority_height={}", max_height, majority_height);
+            }
+        }        
+    }
+}
+
+
+async fn selfish_mining_detection_task2(receiver: Receiver<JobUpdate<'static>>) {
+    info!("Starting selfish mining detection task");
+
+    // We want to detect selfish mining. A pool or a group of pools are
+    // selfish mining when they don't publish recently mined blocks and
+    // keep building on top of the unpublished blocks.
+    //
+    // To detect this, we can look for pools that mine blocks on a 
+    // slighly higher height than other pools. We don't care about pools
+    // mining on the same height but a different prev_hash. While this
+    // might happen during selfish mining (a competing pool catches up),
+    // the selfish-mining pool usualy mined on a higher height before.
+    // Starting selfish mining on an older block does not make sense. 
+    
+    // Keep track of which height and prev_hash pools are mining on.
+    
+        
+
+
+// SELECT 
+// 	min(timestamp) as start, pool_name, height, prev_hash
+// FROM
+// 	job_updates
+// WHERE 
+// 	height > 0 AND pool_name != 'NiceHash ASICBoost'
+// GROUP BY
+// 	pool_name, height, prev_hash
+// ORDER BY
+// 	start ASC;
+
+
+
+
+
+// WITH ValueChanges AS (
+//     SELECT
+//         timestamp,
+//         pool_name,
+//         height,
+// 	prev_hash,
+//         LAG(height) OVER (PARTITION BY pool_name ORDER BY timestamp) AS previous_height
+//     FROM
+//         job_updates
+//     WHERE pool_name != 'NiceHash ASICBoost'
+// )
+// SELECT
+//     timestamp,
+//     pool_name,
+//     height,
+//     prev_hash
+// FROM
+//     ValueChanges
+// WHERE
+//     height <> previous_height OR previous_height IS NULL
+// ORDER BY
+//     timestamp ASC;
+
+
+// WITH dup AS (
+// 	WITH HeightHashPairs AS (
+// 	    	SELECT
+// 			height, prev_hash
+// 		FROM
+// 			job_updates
+// 		WHERE
+// 				height > 0
+// 			AND 
+// 				pool_name != 'NiceHash ASICBoost'
+// 		GROUP BY
+// 			height, prev_hash
+// 	)
+// 	SELECT height
+// 	FROM HeightHashPairs
+// 	GROUP BY height
+// 	HAVING count(height) > 1
+// )
+// SELECT DISTINCT height, prev_hash, pool_name
+// FROM job_updates
+// WHERE height IN dup;
+
+
+
+
+
+    // we only want to consider jobs that are older than `min_job_age` seconds
+    // to make sure we don't consider someone who just found a block as selfish
+    // mining when other pools haven't had a chance to learn about it.
+    // Assumption: The majority of pools should switch to a new block in 5 seconds.
+    let min_job_age: i64 = 5;
+
+    let recent_jobs: BTreeMap<String, JobUpdate> = BTreeMap::new();
+    let recent_jobs_rwl_arc = Arc::new(RwLock::new(recent_jobs));
+
+    let recent_jobs_write = recent_jobs_rwl_arc.clone();
+    task::spawn(async move {
+        loop {
+            let job = receiver.recv().await.unwrap();
+            {
+                let mut recent_jobs_ = recent_jobs_write.write().await;
+                recent_jobs_.insert(job.pool.name.clone(), job.clone());
+            }
+        }
+    });
+
+    let recent_jobs_read = recent_jobs_rwl_arc.clone();
+    loop {
+        task::sleep(Duration::from_secs(2)).await;
+        {        
+            let recent_jobs_ = recent_jobs_read.read().await;
+            let mut max_height = 0;
+            let mut height_occurences: BTreeMap<u32, u16> = BTreeMap::new();
+            for height in recent_jobs_.values().filter(|job| job.age() > min_job_age).map(|job_update| job_update.coinbase_info().height) {
+                if height > max_height {
+                    max_height = height;
+                }
+                height_occurences.entry(height).and_modify(|occurences| {*occurences += 1} ).or_insert(1);
+            }
+        
+            println!("occurences={:?}, max={}", height_occurences, max_height);
+            // find out what the majority of pools mines on
+            let mut majority_size = 0;
+            let mut majority_height = 0;
+            for (height, size) in height_occurences.iter() {
+                if *size > majority_size {
+                    majority_height = *height;
+                    majority_size = *size;
+                }
+            }
+            if majority_height < max_height {
+                warn!("max_height={} while majority_height={}", max_height, majority_height);
+            }
+        }        
     }
 }
