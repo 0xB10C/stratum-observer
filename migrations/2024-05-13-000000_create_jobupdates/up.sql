@@ -1,5 +1,5 @@
 CREATE TABLE IF NOT EXISTS job_updates (
-    id                  INTEGER   PRIMARY KEY,
+    id                  SERIAL    PRIMARY KEY,
     timestamp           TIMESTAMP NOT NULL,
     pool_name           TEXT      NOT NULL,
     coinbase_tag        TEXT      NOT NULL,
@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS job_updates (
     header_version      BIGINT    NOT NULL,
     header_bits         BIGINT    NOT NULL,
     header_time         BIGINT    NOT NULL,
-    extranonce1         BLOB      NOT NULL,
+    extranonce1         BYTEA     NOT NULL,
     extranonce2_size    INTEGER   NOT NULL,
     clean_jobs          BOOL      NOT NULL
 )

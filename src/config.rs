@@ -98,12 +98,10 @@ mod tests {
             FILENAME_EXAMPLE_CONFIG
         ));
         assert_eq!(
-            config.database_path,
-            Some(String::from("stratum-observer.sqlite"))
-        );
-        assert_eq!(
             config.postgresql_url,
-            Some(String::from("postgres://<user>:<password>@<host>:<port>/<dbname>"))
+            Some(String::from(
+                "postgres://<user>:<password>@<host>:<port>/<dbname>"
+            ))
         );
         assert_eq!(
             config.websocket_address,

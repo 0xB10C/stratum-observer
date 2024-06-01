@@ -8,8 +8,8 @@ use async_std::sync::Arc;
 use async_std::sync::RwLock;
 use async_std::task;
 use client::Client;
+use diesel::pg::PgConnection;
 use diesel::prelude::*;
-use diesel::sqlite::SqliteConnection;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use env_logger::Env;
 use log::{debug, error, info, warn};
@@ -47,14 +47,14 @@ async fn main() {
         });
     }
 
-    let enable_database = config.database_path.is_some();
+    let enable_database = config.postgresql_url.is_some();
     let enable_websocket = config.websocket_address.is_some();
     if !enable_database && !enable_websocket {
         warn!("Neither database_path nor websocket_address are set: nothing to do");
         exit(3)
     }
 
-    let (sqlite_sender, sqlite_receiver) = unbounded();
+    let (db_sender, db_receiver) = unbounded();
     let (websocket_sender, websocket_receiver) = unbounded();
 
     // websocket sender task
@@ -69,14 +69,14 @@ async fn main() {
     }
 
     // database writer task
-    if let Some(db_path) = config.database_path.clone() {
+    if let Some(db_url) = config.postgresql_url.clone() {
         task::spawn(async move {
-            sqlite_writer_task(sqlite_receiver, &db_path).await;
+            db_writer_task(db_receiver, &db_url).await;
             exit(2)
         });
     } else {
-        sqlite_sender.close();
-        sqlite_receiver.close();
+        db_sender.close();
+        db_receiver.close();
     }
 
     // main task
@@ -86,8 +86,8 @@ async fn main() {
             match job_receiver.recv().await {
                 Ok(job) => {
                     if enable_database {
-                        if let Err(e) = sqlite_sender.send(job.clone()).await {
-                            error!("could not send a job to the sqlite task: {}", e);
+                        if let Err(e) = db_sender.send(job.clone()).await {
+                            error!("could not send a job to the database task: {}", e);
                             break;
                         }
                     }
@@ -239,9 +239,10 @@ async fn websocket_sender_task(receiver: Receiver<JobUpdate<'static>>, ws_addr: 
     }
 }
 
-async fn sqlite_writer_task(receiver: Receiver<JobUpdate<'_>>, db_path: &str) {
-    info!("Opening database at {}", db_path);
-    let mut conn = SqliteConnection::establish(db_path).unwrap(); // TODO
+async fn db_writer_task(receiver: Receiver<JobUpdate<'_>>, db_url: &str) {
+    info!("Connecting to database at {}", db_url);
+    let mut conn = PgConnection::establish(&db_url)
+        .unwrap_or_else(|_| panic!("Error connecting to {}", db_url));
     conn.run_pending_migrations(MIGRATIONS).unwrap(); // TODO
 
     loop {
