@@ -26,18 +26,20 @@ pub struct Pool {
 #[diesel(table_name = job_updates)]
 pub struct NewJobUpdate {
     pub timestamp: chrono::NaiveDateTime,
-    pub pool_name: String,
-    pub coinbase_tag: String,
-    pub prev_hash: String,
-    pub merkle_branches: String,
-    pub height: i64,
-    pub output_sum: i64,
+    pub pool: String,
+    pub merkle_branches: Vec<Vec<u8>>,
     pub header_version: i64,
     pub header_bits: i64,
     pub header_time: i64,
+    pub header_prev_hash: String,
     pub clean_jobs: bool,
     pub extranonce1: Vec<u8>,
     pub extranonce2_size: i32,
+    pub coinbase_raw: Vec<u8>,
+    pub coinbase_tag: String,
+    pub coinbase_value: i64,
+    pub coinbase_height: i64,
+    pub coinbase_output_count: i32,
 }
 
 impl From<JobUpdate<'_>> for NewJobUpdate {
@@ -45,24 +47,25 @@ impl From<JobUpdate<'_>> for NewJobUpdate {
         let coinbase_info = o.coinbase_info();
         NewJobUpdate {
             timestamp: o.timestamp.naive_utc(),
-            pool_name: o.pool.name.clone(),
-            prev_hash: o.prev_block_hash().to_string(),
+            pool: o.pool.name.clone(),
             merkle_branches: o
                 .job
                 .merkle_branch
                 .iter()
-                .map(|b| encode_hex(b.as_ref()))
-                .collect::<Vec<String>>()
-                .join(":"),
-            coinbase_tag: coinbase_info.tag,
-            height: coinbase_info.height as i64,
-            output_sum: coinbase_info.value_sum as i64,
+                .map(|branch| branch.as_ref().to_vec())
+                .collect(),
             header_version: o.job.version.0 as i64,
             header_bits: o.job.bits.0 as i64,
             header_time: o.job.time.0 as i64,
+            header_prev_hash: o.prev_block_hash().to_string(),
             extranonce1: o.extranonce1.as_ref().to_vec(),
             extranonce2_size: o.extranonce2_size as i32,
             clean_jobs: o.job.clean_jobs,
+            coinbase_raw: coinbase_info.raw,
+            coinbase_value: coinbase_info.value_sum as i64,
+            coinbase_tag: coinbase_info.tag,
+            coinbase_height: coinbase_info.height as i64,
+            coinbase_output_count: coinbase_info.output_count,
         }
     }
 }
@@ -110,6 +113,8 @@ pub struct CoinbaseInfo {
     pub height: u32,
     pub tag: String,
     pub value_sum: u64,
+    pub output_count: i32,
+    pub raw: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,10 +130,9 @@ pub struct JobUpdate<'a> {
 }
 
 impl JobUpdate<'_> {
-    pub fn coinbase(&self) -> Result<bitcoin::Transaction, ConsensusError> {
+    pub fn raw_coinbase(&self) -> Vec<u8> {
         let extranonce2 = vec![&0u8; self.extranonce2_size];
-        let rawtx: Vec<u8> = self
-            .job
+        self.job
             .coin_base1
             .as_ref()
             .into_iter()
@@ -136,21 +140,24 @@ impl JobUpdate<'_> {
             .chain(extranonce2.into_iter())
             .chain(self.job.coin_base2.as_ref().into_iter())
             .map(|b| *b)
-            .collect();
+            .collect()
+    }
 
-        let result = bitcoin::consensus::deserialize(&rawtx);
+    pub fn coinbase(&self) -> Result<bitcoin::Transaction, ConsensusError> {
+        let result = bitcoin::consensus::deserialize(&self.raw_coinbase());
         if let Err(ref e) = result {
             warn!("failed to deserialize coinbase transaction with extranonce1={} extranonce2size={}: {} - rawtx={}",
                 encode_hex(self.extranonce1.as_ref()),
                 self.extranonce2_size,
                 e,
-                encode_hex(&rawtx),
+                encode_hex(&self.raw_coinbase()),
             );
         }
         result
     }
 
     pub fn coinbase_info(&self) -> CoinbaseInfo {
+        let raw_coinbase = self.raw_coinbase();
         match self.coinbase() {
             Ok(coinbase) => {
                 let coinbase_script_sig = &coinbase
@@ -167,12 +174,16 @@ impl JobUpdate<'_> {
                         .iter()
                         .map(|o| o.value.to_sat() as u64)
                         .sum::<u64>(),
+                    output_count: coinbase.output.len() as i32,
+                    raw: raw_coinbase,
                 }
             }
             Err(e) => CoinbaseInfo {
                 height: 0,
                 tag: format!("failed to deserialize coinbase: {}", e),
                 value_sum: 0,
+                output_count: 0,
+                raw: raw_coinbase,
             },
         }
     }
