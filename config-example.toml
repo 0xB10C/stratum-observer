@@ -1,15 +1,5 @@
 # stratum observer configuration
 
-## SQLite
-# stratum-observer can record stratum jobs to a SQLite database.
-# Depending on the number of pools you connect to, this database
-# can grow multiple megabyte per day. Make sure to rotate it from
-# time to time.
-#
-# If "database_path" is included and not empty, stratum job recording
-# to SQLite is enabled.
-database_path = "stratum-observer.sqlite"
-
 ## postgresql
 # stratum-observer can record stratum jobs to a PostgreSQL database.
 # Depending on the number of pools you connect to, this database

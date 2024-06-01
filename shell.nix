@@ -5,6 +5,6 @@ pkgs.mkShell {
       pkgs.cargo
       pkgs.rustc
       pkgs.rustfmt
-      pkgs.sqlite
+      pkgs.postgresql
     ];
 }

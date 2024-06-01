@@ -2,19 +2,19 @@
 
 diesel::table! {
     job_updates (id) {
-        id -> Nullable<Integer>,
+        id -> Int4,
         timestamp -> Timestamp,
         pool_name -> Text,
         coinbase_tag -> Text,
         prev_hash -> Text,
         merkle_branches -> Text,
-        height -> BigInt,
-        output_sum -> BigInt,
-        header_version -> BigInt,
-        header_bits -> BigInt,
-        header_time -> BigInt,
-        extranonce1 -> Binary,
-        extranonce2_size -> Integer,
+        height -> Int8,
+        output_sum -> Int8,
+        header_version -> Int8,
+        header_bits -> Int8,
+        header_time -> Int8,
+        extranonce1 -> Bytea,
+        extranonce2_size -> Int4,
         clean_jobs -> Bool,
     }
 }
