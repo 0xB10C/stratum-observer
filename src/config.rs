@@ -13,6 +13,7 @@ use log::info;
 #[derive(Debug, Deserialize, PartialEq)]
 pub struct Config {
     pub database_path: Option<String>,
+    pub postgresql_url: Option<String>,
     pub websocket_address: Option<String>,
     pub pools: Vec<Pool>,
 }
@@ -99,6 +100,10 @@ mod tests {
         assert_eq!(
             config.database_path,
             Some(String::from("stratum-observer.sqlite"))
+        );
+        assert_eq!(
+            config.postgresql_url,
+            Some(String::from("postgres://<user>:<password>@<host>:<port>/<dbname>"))
         );
         assert_eq!(
             config.websocket_address,
