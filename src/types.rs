@@ -160,11 +160,26 @@ impl JobUpdate<'_> {
         let raw_coinbase = self.raw_coinbase();
         match self.coinbase() {
             Ok(coinbase) => {
-                let coinbase_script_sig = &coinbase
-                    .input
-                    .first()
-                    .expect("coinbase should have an input")
-                    .script_sig;
+                // A coinbase always has exactly one input, but a transaction
+                // without any inputs still deserializes, so don't trust the
+                // pool to send us one that has an input.
+                let coinbase_script_sig = match coinbase.input.first() {
+                    Some(input) => &input.script_sig,
+                    None => {
+                        warn!(
+                            "coinbase transaction has no inputs: rawtx={}",
+                            encode_hex(&raw_coinbase),
+                        );
+                        return CoinbaseInfo {
+                            height: 0,
+                            tag: "failed to deserialize coinbase: transaction has no inputs"
+                                .to_string(),
+                            value_sum: 0,
+                            output_count: 0,
+                            raw: raw_coinbase,
+                        };
+                    }
+                };
 
                 CoinbaseInfo {
                     height: bip34_coinbase_block_height(&coinbase_script_sig).unwrap_or_default(),
@@ -201,5 +216,94 @@ impl JobUpdate<'_> {
     /// Age of the JobUpdate in seconds.
     pub fn age(&self) -> i64 {
         (Utc::now() - self.timestamp).num_seconds()
+    }
+}
+
+#[cfg(test)]
+pub mod test_support {
+    use super::*;
+    use crate::utils::decode_hex;
+    use sv1_api::json_rpc;
+
+    pub fn test_pool() -> Pool {
+        Pool {
+            name: "test pool".to_string(),
+            endpoint: "pool.example.com:3333".to_string(),
+            user: "user".to_string(),
+            password: None,
+            max_lifetime: None,
+        }
+    }
+
+    /// Build a JobUpdate from a `mining.notify` line as a pool sends it, plus
+    /// the extranonce1 and the extranonce2 size the pool handed out when the
+    /// client subscribed.
+    pub fn job_update_from_notify(
+        notify_json: &str,
+        extranonce1_hex: &str,
+        extranonce2_size: usize,
+    ) -> JobUpdate<'static> {
+        let message: json_rpc::Message =
+            serde_json::from_str(notify_json).expect("the notify line should be valid JSON");
+        let notification = match message {
+            json_rpc::Message::Notification(n) => n,
+            other => panic!("the notify line is not a notification: {:?}", other),
+        };
+        assert_eq!(notification.method, "mining.notify");
+        let job = server_to_client::Notify::try_from(notification)
+            .expect("the notification should be a mining.notify");
+        let now = Utc::now();
+        JobUpdate {
+            timestamp: now,
+            pool: test_pool(),
+            job,
+            extranonce1: Extranonce::try_from(decode_hex(extranonce1_hex).unwrap()).unwrap(),
+            extranonce2_size,
+            time_connected: now,
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::test_support::*;
+    use super::*;
+
+    /// A coinbase that holds no inputs at all. Such a transaction deserializes
+    /// fine, even though a real coinbase always has exactly one input. Taken
+    /// apart: a version, a segwit marker and flag, no inputs, no outputs and a
+    /// locktime.
+    const NO_INPUT_COINBASE_1: &str = "010000000001";
+    const NO_INPUT_COINBASE_EXTRANONCE1: &str = "00";
+    const NO_INPUT_COINBASE_2: &str = "00000000";
+
+    fn no_input_coinbase_job() -> JobUpdate<'static> {
+        let notify = format!(
+            r#"{{"method":"mining.notify","params":["job1","{}","{}","{}",[],"20000000","17031abe","66bca309",true]}}"#,
+            "0".repeat(64),
+            NO_INPUT_COINBASE_1,
+            NO_INPUT_COINBASE_2,
+        );
+        job_update_from_notify(&notify, NO_INPUT_COINBASE_EXTRANONCE1, 1)
+    }
+
+    #[test]
+    fn test_coinbase_without_inputs_does_not_panic() {
+        let job = no_input_coinbase_job();
+        assert_eq!(encode_hex(&job.raw_coinbase()), "010000000001000000000000");
+        // The transaction itself deserializes, it just has no input to read the
+        // height and the tag from.
+        assert!(job.coinbase().is_ok());
+
+        let info = job.coinbase_info();
+        assert_eq!(info.height, 0);
+        assert_eq!(info.output_count, 0);
+        assert_eq!(info.value_sum, 0);
+        assert_eq!(info.raw, job.raw_coinbase());
+        assert!(
+            info.tag.starts_with("failed to deserialize coinbase:"),
+            "the tag should say what went wrong, got {:?}",
+            info.tag
+        );
     }
 }
