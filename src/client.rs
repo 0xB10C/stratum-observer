@@ -226,6 +226,12 @@ impl Client<'static> {
         task::spawn(async move {
             loop {
                 if let Some(mut self_) = cloned.try_lock() {
+                    // The client has already been stopped elsewhere, for
+                    // example because the pool closed the connection. Hand on
+                    // the messages that did arrive before stopping.
+                    if self_.shutting_down && self_.receiver_incoming.is_empty() {
+                        break;
+                    }
                     let incoming = self_.receiver_incoming.try_recv();
                     self_.parse_message(incoming).await;
 
