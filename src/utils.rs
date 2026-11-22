@@ -304,6 +304,28 @@ mod test {
     }
 
     #[test]
+    fn test_decode_hex_error_messages() {
+        use std::error::Error;
+
+        let odd = decode_hex("abc").unwrap_err();
+        assert_eq!(odd.to_string(), "hex string has an odd number of digits");
+        assert!(odd.source().is_none());
+
+        let invalid = decode_hex("zz").unwrap_err();
+        let message = invalid.to_string();
+        assert!(
+            message.starts_with("hex string has an invalid digit: "),
+            "unexpected message: {}",
+            message
+        );
+        // The underlying parse error is kept so callers can inspect it.
+        let source = invalid
+            .source()
+            .expect("invalid digit should have a source");
+        assert!(message.ends_with(&source.to_string()));
+    }
+
+    #[test]
     fn test_decode_hex_empty() {
         assert_eq!(decode_hex(""), Ok(vec![]));
         assert_eq!(decode_hex("0x"), Ok(vec![]));
