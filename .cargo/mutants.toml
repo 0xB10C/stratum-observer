@@ -8,3 +8,9 @@ exclude_globs = ["src/main.rs", "src/schema.rs"]
 # slow things down some headroom before they count as a timeout.
 timeout_multiplier = 3.0
 minimum_test_timeout = 60.0
+
+# `handle_error_message` only logs the error message a pool sent and hands
+# back `Ok(None)`, which is exactly what the mutant does. There is no
+# behaviour left to tell the two apart, so testing it would only mean writing
+# a test that asserts nothing.
+exclude_re = ["handle_error_message"]

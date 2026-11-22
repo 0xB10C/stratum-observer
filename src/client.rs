@@ -603,6 +603,13 @@ mod tests {
         r#"{"id":1,"error":null,"result":[[["mining.notify","abc"]],"f11f9113",4]}"#;
     /// A pool that has nothing to configure answers with an empty result.
     const CONFIGURE_RESPONSE: &str = r#"{"id":0,"error":null,"result":{}}"#;
+    /// A pool that lets miners roll the version answers the configure with the
+    /// mask of the bits it allows and the number of bits it wants rolled.
+    const CONFIGURE_RESPONSE_VERSION_ROLLING: &str = concat!(
+        r#"{"id":0,"error":null,"result":{"version-rolling":true,"#,
+        r#""version-rolling.mask":"1fffe000","#,
+        r#""version-rolling.min-bit-count":"00000005"}}"#
+    );
     /// A pool handing out a new extranonce in the middle of a session.
     const SET_EXTRANONCE: &str =
         r#"{"id":null,"method":"mining.set_extranonce","params":["aabbccddee",2]}"#;
@@ -643,6 +650,11 @@ mod tests {
         serde_json::from_str(line).expect("the test message should be valid JSON")
     }
 
+    /// A message as JSON, the way it goes over the wire to the pool.
+    fn request_json(message: &json_rpc::Message) -> serde_json::Value {
+        serde_json::to_value(message).expect("a message should serialize")
+    }
+
     /// Reads the id and the method of everything the client has sent so far.
     fn sent_requests(receiver: &Receiver<String>) -> Vec<(u64, String)> {
         let mut requests = vec![];
@@ -673,6 +685,53 @@ mod tests {
         // The library answers a configure response with a subscribe message. We
         // send our own subscribe, so we ignore it - it just must not be an error.
         assert!(answer.is_some());
+
+        // A pool that configures nothing leaves the version rolling off, so the
+        // next configure asks for nothing again.
+        assert_eq!(h.client.version_rolling_mask(), None);
+        assert_eq!(h.client.version_rolling_min_bit(), None);
+        assert_eq!(
+            request_json(&h.client.configure(4)),
+            serde_json::json!({
+                "id": 4,
+                "method": "mining.configure",
+                "params": [[], {}],
+            })
+        );
+    }
+
+    /// What a pool answers to the configure decides how the miners on it may
+    /// roll the version of the jobs we report, so the client keeps the settings
+    /// and asks for the same ones again on its next connection.
+    #[test]
+    fn a_configure_response_sets_the_version_rolling() {
+        let mut h = harness();
+        assert_eq!(h.client.version_rolling_mask(), None);
+        assert_eq!(h.client.version_rolling_min_bit(), None);
+
+        h.client
+            .handle_message(message(CONFIGURE_RESPONSE_VERSION_ROLLING))
+            .expect("a configure response should be handled");
+
+        assert_eq!(h.client.version_rolling_mask(), Some(HexU32Be(0x1fffe000)));
+        assert_eq!(h.client.version_rolling_min_bit(), Some(HexU32Be(5)));
+        assert_eq!(h.client.status, ClientStatus::Configured);
+
+        // The next configure asks the pool for what it handed out.
+        assert_eq!(
+            request_json(&h.client.configure(9)),
+            serde_json::json!({
+                "id": 9,
+                "method": "mining.configure",
+                "params": [
+                    ["version-rolling"],
+                    {
+                        "version-rolling.mask": "1fffe000",
+                        "version-rolling.min-bit-count": "00000005",
+                    },
+                ],
+            })
+        );
     }
 
     #[test]
@@ -687,6 +746,10 @@ mod tests {
         assert_eq!(encode_hex(h.client.extranonce1.as_ref()), "f11f9113");
         assert_eq!(h.client.extranonce2_size, 4);
         assert_eq!(h.client.status, ClientStatus::Subscribed);
+        // Both are needed to build the coinbase of a job, so they are also what
+        // the client reports to whoever asks it.
+        assert_eq!(encode_hex(h.client.extranonce1().as_ref()), "f11f9113");
+        assert_eq!(IsClient::extranonce2_size(&h.client), 4);
     }
 
     #[test]
@@ -718,10 +781,14 @@ mod tests {
         assert_eq!(job.job.merkle_branch.len(), 1);
         assert_eq!(job.time_connected, h.client.time_connected);
 
-        // The client remembers the job, so it knows when the last one came in.
+        // The client remembers the job, so it knows when the last one came in
+        // and can say which job the pool is working on.
         assert!(h.client.time_last_notify.is_some());
         let remembered = h.client.last_notify.clone().expect("a remembered job");
         assert_eq!(remembered.job_id, "job1");
+        let reported = IsClient::last_notify(&h.client).expect("the last job is reported");
+        assert_eq!(reported.job_id, "job1");
+        assert_eq!(reported.version, HexU32Be(0x20000000));
     }
 
     #[test]
