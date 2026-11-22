@@ -42,7 +42,9 @@ async fn main() {
     // websocket sender task
     if let Some(ws_addr) = config.websocket_address.clone() {
         task::spawn(async move {
-            websocket_sender_task(websocket_receiver, &ws_addr).await;
+            if let Err(e) = websocket_sender_task(websocket_receiver, &ws_addr).await {
+                error!("Could not start the websocket server on {}: {}", ws_addr, e);
+            }
             exit(1)
         });
     } else {

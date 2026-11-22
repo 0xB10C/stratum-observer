@@ -5,7 +5,7 @@ use async_channel::Receiver;
 use async_std::sync::Arc;
 use async_std::sync::RwLock;
 use async_std::task;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use std::collections::BTreeMap;
 use std::net::{TcpListener, TcpStream};
 use tungstenite::{accept, WebSocket};
@@ -32,17 +32,16 @@ fn send_job(websocket: &mut WebSocket<TcpStream>, job: &JobUpdate) -> bool {
 }
 
 /// Binds a websocket server to the given address and sends all jobs it
-/// receives to the connected websocket clients.
-pub async fn websocket_sender_task(receiver: Receiver<JobUpdate<'static>>, ws_addr: &str) {
+/// receives to the connected websocket clients. Hands back the error when the
+/// address cannot be used, so the caller can say so and stop.
+pub async fn websocket_sender_task(
+    receiver: Receiver<JobUpdate<'static>>,
+    ws_addr: &str,
+) -> Result<(), std::io::Error> {
     info!("Starting websocket server on {}", ws_addr);
-    let listener = match TcpListener::bind(ws_addr) {
-        Ok(l) => l,
-        Err(e) => {
-            error!("Could not start websocket server on {}: {}", ws_addr, e);
-            return;
-        }
-    };
-    websocket_sender_task_with_listener(receiver, listener).await
+    let listener = TcpListener::bind(ws_addr)?;
+    websocket_sender_task_with_listener(receiver, listener).await;
+    Ok(())
 }
 
 /// Sends all jobs it receives to the clients connecting to the already bound

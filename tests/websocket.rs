@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 use stratum_observer::types::{JobUpdate, JobUpdateJson};
-use stratum_observer::websocket::websocket_sender_task_with_listener;
+use stratum_observer::websocket::{websocket_sender_task, websocket_sender_task_with_listener};
 use tungstenite::stream::MaybeTlsStream;
 
 /// How long a test waits for something that should happen right away.
@@ -331,4 +331,67 @@ async fn test_closed_job_channel_does_not_crash_the_server() {
         snapshot
     );
     assert_eq!(snapshot[0]["pool_name"], Value::from(warmup.as_str()));
+}
+
+/// An address that is already taken is the usual reason the server cannot
+/// start - another copy of the tool is running, for example. The task says so
+/// instead of looking like a server that is up.
+#[async_std::test]
+async fn test_an_address_in_use_is_reported() {
+    let taken = TcpListener::bind("127.0.0.1:0").expect("binding a free port should work");
+    let addr = taken.local_addr().expect("the port that was picked");
+    let (_sender, receiver) = async_channel::unbounded();
+
+    let error = timeout(WAIT, websocket_sender_task(receiver, &addr.to_string()))
+        .await
+        .expect("an address that is in use should be reported right away")
+        .expect_err("the address is taken, so the server cannot start");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+}
+
+/// On an address it can use, the task serves the jobs: a client connecting
+/// there gets them.
+#[async_std::test]
+async fn test_the_server_listens_on_the_address_it_is_given() {
+    // A port the operating system has just handed out is free, so the server
+    // can take it over.
+    let addr = {
+        let free = TcpListener::bind("127.0.0.1:0").expect("binding a free port should work");
+        free.local_addr().expect("the port that was picked")
+    };
+    let pool = unique_name("pool");
+    let (sender, receiver) = async_channel::unbounded();
+    sender.send(real_block_job(&pool)).await.unwrap();
+    let mut server = task::spawn(async move {
+        websocket_sender_task(receiver, &addr.to_string())
+            .await
+            .expect("a free address should work")
+    });
+
+    // Binding happens in the task, so the address takes a moment to answer.
+    let start = std::time::Instant::now();
+    while TcpStream::connect(addr).is_err() {
+        assert!(
+            start.elapsed() < WAIT,
+            "the server should listen on {}",
+            addr
+        );
+        task::sleep(Duration::from_millis(20)).await;
+    }
+
+    let snapshot = wait_until_known(addr, &pool).await;
+    assert!(
+        snapshot
+            .iter()
+            .any(|job| job["pool_name"] == Value::from(pool.as_str())),
+        "a client on {} should get the job of '{}'",
+        addr,
+        pool
+    );
+    // Serving the clients is all the task does, so it keeps running.
+    assert!(
+        timeout(QUIET, &mut server).await.is_err(),
+        "the server should still be running"
+    );
 }
