@@ -1,14 +1,52 @@
 use bitcoin::blockdata::script::ScriptBuf;
+use core::num::ParseIntError;
+use std::fmt;
 use std::fmt::Write;
 
-pub fn decode_hex(s: &str) -> Result<Vec<u8>, core::num::ParseIntError> {
-    let s = match s.strip_prefix("0x") {
-        Some(s) => s,
-        None => s,
-    };
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16))
+/// Reasons why a string can't be decoded into bytes by [decode_hex].
+#[derive(Debug, PartialEq, Eq)]
+pub enum HexDecodeError {
+    /// The string holds an odd number of hex digits, so the last byte is incomplete.
+    OddLength,
+    /// The string holds something that isn't a hex digit.
+    InvalidDigit(ParseIntError),
+}
+
+impl fmt::Display for HexDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            HexDecodeError::OddLength => write!(f, "hex string has an odd number of digits"),
+            HexDecodeError::InvalidDigit(e) => write!(f, "hex string has an invalid digit: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for HexDecodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            HexDecodeError::OddLength => None,
+            HexDecodeError::InvalidDigit(e) => Some(e),
+        }
+    }
+}
+
+/// Decode a hex string, with or without a leading `0x`, into bytes.
+pub fn decode_hex(s: &str) -> Result<Vec<u8>, HexDecodeError> {
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    let digits = s.as_bytes();
+    if digits.len() % 2 != 0 {
+        return Err(HexDecodeError::OddLength);
+    }
+    digits
+        .chunks(2)
+        .map(|pair| {
+            // Work on bytes rather than on characters, as a string can hold
+            // characters that are more than one byte long. Such a pair of bytes
+            // can't be valid hex anyway, so we hand it to the parser as a pair
+            // that it rejects.
+            let pair = std::str::from_utf8(pair).unwrap_or("zz");
+            u8::from_str_radix(pair, 16).map_err(HexDecodeError::InvalidDigit)
+        })
         .collect()
 }
 
@@ -129,5 +167,58 @@ mod test {
             &decoded_w_prefix, &test_vec,
             "Hex w/ prefix not decoded correctly"
         );
+    }
+
+    #[test]
+    fn test_decode_hex_odd_length() {
+        assert_eq!(decode_hex("abc"), Err(HexDecodeError::OddLength));
+        assert_eq!(decode_hex("0"), Err(HexDecodeError::OddLength));
+        assert_eq!(decode_hex("0xabc"), Err(HexDecodeError::OddLength));
+    }
+
+    #[test]
+    fn test_decode_hex_invalid_input() {
+        // Not a hex digit.
+        assert!(matches!(
+            decode_hex("zz"),
+            Err(HexDecodeError::InvalidDigit(_))
+        ));
+        // Multi byte characters must not panic either, no matter where in the
+        // string they are and how long they are.
+        for input in ["ä", "ää", "aä", "äa", "€", "a€", "€a", "aa€b"] {
+            assert!(
+                decode_hex(input).is_err(),
+                "decoding {} should fail, not panic",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_decode_hex_empty() {
+        assert_eq!(decode_hex(""), Ok(vec![]));
+        assert_eq!(decode_hex("0x"), Ok(vec![]));
+    }
+
+    #[test]
+    fn test_decode_hex_uppercase() {
+        assert_eq!(decode_hex("DEADBEEF"), Ok(vec![222, 173, 190, 239]));
+        assert_eq!(decode_hex("0xDeAdBeEf"), Ok(vec![222, 173, 190, 239]));
+    }
+
+    #[test]
+    fn test_encode_decode_hex_roundtrip() {
+        let cases: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![0],
+            vec![0xff],
+            vec![0x00, 0x01, 0x7f, 0x80, 0xfe, 0xff],
+            (0u8..=255).collect(),
+        ];
+        for bytes in cases {
+            let hex = encode_hex(&bytes);
+            assert_eq!(hex.len(), bytes.len() * 2);
+            assert_eq!(decode_hex(&hex), Ok(bytes));
+        }
     }
 }
