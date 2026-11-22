@@ -50,6 +50,11 @@ pub async fn db_writer_task(
             task::sleep(retry_delay).await;
         }
 
+        if receiver.is_closed() && receiver.is_empty() {
+            info!("Nobody sends jobs to the database anymore, stopping");
+            return;
+        }
+
         let mut conn = match PgConnection::establish(db_url) {
             Ok(conn) => conn,
             Err(e) => {

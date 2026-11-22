@@ -258,3 +258,46 @@ async fn test_closed_job_channel_stops_the_writer() {
         "the closed job channel should not have made the writer panic"
     );
 }
+
+#[async_std::test]
+async fn test_an_unreachable_database_is_retried() {
+    // Port 1 is not open, so the writer cannot reach a database at all. No
+    // test database is needed for this.
+    let db_url = "postgres://127.0.0.1:1/nothing".to_string();
+    let panics_before = count_panics();
+
+    let (sender, receiver) = async_channel::unbounded();
+    sender
+        .send(real_block_job(&unique_name("pool")))
+        .await
+        .unwrap();
+    let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped_in_task = stopped.clone();
+    task::spawn(async move {
+        db_writer_task(receiver, &db_url, RETRY_DELAY).await;
+        stopped_in_task.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    // The writer keeps trying instead of giving up or panicking.
+    task::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !stopped.load(std::sync::atomic::Ordering::SeqCst),
+        "the writer should still be trying to reach the database"
+    );
+    assert_eq!(
+        count_panics(),
+        panics_before,
+        "the unreachable database should not have made the writer panic"
+    );
+
+    // Once nobody sends jobs anymore there is nothing left to wait for.
+    drop(sender);
+    let start = std::time::Instant::now();
+    while !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(
+            start.elapsed() < WAIT,
+            "the writer should stop once nobody sends jobs anymore"
+        );
+        task::sleep(Duration::from_millis(20)).await;
+    }
+}
