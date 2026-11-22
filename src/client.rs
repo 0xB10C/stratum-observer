@@ -29,6 +29,33 @@ const STRATUM_JOB_TIMEOUT_SECONDS: u64 = 60;
 /// The default max lifetime of a connection to a stratum server.
 const STRATUM_CONNECTION_MAX_LIFETIME_SECONDS: u32 = 590; // just below 10 minutes as some pools disconnect after 10 minutes
 
+/// Why the client gives up on a connection to a pool.
+#[derive(Debug, PartialEq, Eq)]
+enum DisconnectReason {
+    /// The connection has been open for longer than the pool allows.
+    MaxLifetime,
+    /// The pool has not sent a job in a long time.
+    JobTimeout,
+}
+
+/// Decides whether a connection should be closed, from how long it has been
+/// open and how long ago the pool sent its last job. A connection on which no
+/// job has arrived yet is left alone: the handshake may still be going on.
+fn should_disconnect(
+    duration_connected: TimeDelta,
+    max_lifetime_seconds: u32,
+    time_since_last_notify: Option<Duration>,
+    job_timeout: Duration,
+) -> Option<DisconnectReason> {
+    if duration_connected > TimeDelta::seconds(max_lifetime_seconds.into()) {
+        return Some(DisconnectReason::MaxLifetime);
+    }
+    match time_since_last_notify {
+        Some(elapsed) if elapsed > job_timeout => Some(DisconnectReason::JobTimeout),
+        _ => None,
+    }
+}
+
 fn extranonce_from_hex<'a>(hex: &str) -> Extranonce<'a> {
     let data = utils::decode_hex(hex).unwrap();
     Extranonce::try_from(data).expect("Failed to convert hex to U256")
@@ -180,33 +207,32 @@ impl Client<'static> {
                     let incoming = self_.receiver_incoming.try_recv();
                     self_.parse_message(incoming).await;
 
-                    // check connection age, disconnect if connection too old
+                    // close the connection when it has been open for too long
+                    // or when the pool stopped sending jobs
                     let duration_connected = Utc::now() - self_.time_connected;
                     let max_lifetime: u32 = self_
                         .pool
                         .max_lifetime
                         .unwrap_or(STRATUM_CONNECTION_MAX_LIFETIME_SECONDS);
-                    if duration_connected > TimeDelta::seconds(max_lifetime.into()) {
-                        debug!(
-                            "Closing connection to {} as the connection is {:?} old (max_lifetime={}s)",
-                            self_.pool.name, duration_connected, max_lifetime,
-                        );
-                        self_.shutdown().await;
-                        break;
-                    }
-
-                    // check last job time, disconnect if too old
-                    if let Some(time_last_notify) = self_.time_last_notify {
-                        if time_last_notify.elapsed()
-                            > Duration::from_secs(STRATUM_JOB_TIMEOUT_SECONDS)
-                        {
-                            warn!(
+                    let job_timeout = Duration::from_secs(STRATUM_JOB_TIMEOUT_SECONDS);
+                    if let Some(reason) = should_disconnect(
+                        duration_connected,
+                        max_lifetime,
+                        self_.time_last_notify.map(|time| time.elapsed()),
+                        job_timeout,
+                    ) {
+                        match reason {
+                            DisconnectReason::MaxLifetime => debug!(
+                                "Closing connection to {} as the connection is {:?} old (max_lifetime={}s)",
+                                self_.pool.name, duration_connected, max_lifetime,
+                            ),
+                            DisconnectReason::JobTimeout => warn!(
                                 "No notify from {} in more than {}s: disconnecting...",
                                 self_.pool.name, STRATUM_JOB_TIMEOUT_SECONDS
-                            );
-                            self_.shutdown().await;
-                            break;
+                            ),
                         }
+                        self_.shutdown().await;
+                        break;
                     }
                 }
                 // It's healthy to sleep after giving up the lock so the other thread has a shot
@@ -708,6 +734,87 @@ mod tests {
         assert!(h.job_receiver.is_empty());
         assert!(h.receiver_shutdown.is_empty());
         assert!(!h.client.shutting_down);
+    }
+
+    /// The timeouts the client runs with when a pool does not ask for a
+    /// shorter connection lifetime.
+    fn default_timeouts() -> (u32, Duration) {
+        (
+            STRATUM_CONNECTION_MAX_LIFETIME_SECONDS,
+            Duration::from_secs(STRATUM_JOB_TIMEOUT_SECONDS),
+        )
+    }
+
+    #[test]
+    fn a_young_connection_with_fresh_jobs_stays_open() {
+        let (max_lifetime, job_timeout) = default_timeouts();
+        assert_eq!(
+            should_disconnect(TimeDelta::zero(), max_lifetime, None, job_timeout),
+            None
+        );
+        assert_eq!(
+            should_disconnect(
+                TimeDelta::seconds(300),
+                max_lifetime,
+                Some(Duration::from_secs(10)),
+                job_timeout
+            ),
+            None
+        );
+        // Being exactly at a limit is not being past it.
+        assert_eq!(
+            should_disconnect(
+                TimeDelta::seconds(590),
+                max_lifetime,
+                Some(Duration::from_secs(60)),
+                job_timeout
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_connection_that_is_too_old_is_closed() {
+        let (max_lifetime, job_timeout) = default_timeouts();
+        assert_eq!(
+            should_disconnect(TimeDelta::seconds(591), max_lifetime, None, job_timeout),
+            Some(DisconnectReason::MaxLifetime)
+        );
+        // A pool can ask for a shorter lifetime than the default.
+        assert_eq!(
+            should_disconnect(TimeDelta::seconds(2), 1, None, job_timeout),
+            Some(DisconnectReason::MaxLifetime)
+        );
+        // When both reasons apply, the age of the connection is the one reported.
+        assert_eq!(
+            should_disconnect(
+                TimeDelta::seconds(591),
+                max_lifetime,
+                Some(Duration::from_secs(600)),
+                job_timeout
+            ),
+            Some(DisconnectReason::MaxLifetime)
+        );
+    }
+
+    #[test]
+    fn a_connection_without_new_jobs_is_closed() {
+        let (max_lifetime, job_timeout) = default_timeouts();
+        assert_eq!(
+            should_disconnect(
+                TimeDelta::seconds(100),
+                max_lifetime,
+                Some(Duration::from_secs(61)),
+                job_timeout
+            ),
+            Some(DisconnectReason::JobTimeout)
+        );
+        // As long as no job has arrived at all we wait: the handshake with the
+        // pool may still be going on.
+        assert_eq!(
+            should_disconnect(TimeDelta::seconds(300), max_lifetime, None, job_timeout),
+            None
+        );
     }
 
     #[async_std::test]
