@@ -268,6 +268,8 @@ pub mod test_support {
 mod test {
     use super::test_support::*;
     use super::*;
+    use crate::utils::decode_hex;
+    use chrono::TimeDelta;
 
     /// A coinbase that holds no inputs at all. Such a transaction deserializes
     /// fine, even though a real coinbase always has exactly one input. Taken
@@ -304,6 +306,185 @@ mod test {
             info.tag.starts_with("failed to deserialize coinbase:"),
             "the tag should say what went wrong, got {:?}",
             info.tag
+        );
+    }
+
+    // The values below belong to mainnet block 856740, hash
+    // 00000000000000000002bc7c54cd5df36e432e93a5ad102344db9ad876f0311a. The
+    // header fields come from the mempool.space API endpoint
+    // /api/block/<hash>, the raw coinbase transaction from
+    // /api/tx/<txid>/hex.
+    const BLOCK_HEIGHT: u32 = 856740;
+    const COINBASE_TXID: &str = "82f3748ef4ffc2acfefbbc682adf34532eef41e13c4819085a8af611a8f118fa";
+    const COINBASE_RAW: &str = "010000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff5503a4120d04b5a2bc667c204d41524120506f6f6c207c204d61646520696e2055534120f09f87baf09f87b8207c202876303331393234293c39dbd326a3c601527b7112d4f11f911356a5e9450000000000ffffffffffffffff0234e2e412000000001976a9142fc701e2049ee4957b07134b6c1d771dd5a96b2188ac0000000000000000266a24aa21a9edd611b073de70673be0fb5a77d929872ad76c718b73c314ad7e8d6e6c71c7712301200000000000000000000000000000000000000000000000000000000000000000aff4fb79";
+    const COINBASE_TAG: &str = "f| MARA Pool | Made in USA  | (v031924)<9";
+    const COINBASE_VALUE: u64 = 316990004;
+    const COINBASE_OUTPUT_COUNT: i32 = 2;
+
+    // The raw coinbase above, split the way a pool splits it: the extranonce1
+    // the pool hands out and the extranonce2 the miner picks both sit in the
+    // input script, between the two coinbase parts. The real transaction has
+    // four zero bytes where the extranonce2 goes, which is exactly what
+    // raw_coinbase() fills in, so the parts add back up to the real
+    // transaction.
+    const COINBASE_1: &str = "010000000001010000000000000000000000000000000000000000000000000000000000000000ffffffff5503a4120d04b5a2bc667c204d41524120506f6f6c207c204d61646520696e2055534120f09f87baf09f87b8207c202876303331393234293c39dbd326a3c601527b7112d4";
+    const EXTRANONCE1: &str = "f11f911356a5e945";
+    const EXTRANONCE2_SIZE: usize = 4;
+    const COINBASE_2: &str = "00ffffffffffffffff0234e2e412000000001976a9142fc701e2049ee4957b07134b6c1d771dd5a96b2188ac0000000000000000266a24aa21a9edd611b073de70673be0fb5a77d929872ad76c718b73c314ad7e8d6e6c71c7712301200000000000000000000000000000000000000000000000000000000000000000aff4fb79";
+
+    /// The hash of block 856739, the way an explorer shows it.
+    const PREV_HASH_DISPLAYED: &str =
+        "00000000000000000002c64b6204ab56f2cd81fca5516c3ca7a1642a9fd65203";
+    /// The same hash the way stratum sends it: the internal byte order, with
+    /// the bytes of every four byte word reversed.
+    const PREV_HASH_STRATUM: &str =
+        "9fd65203a7a1642aa5516c3cf2cd81fc6204ab560002c64b0000000000000000";
+
+    const HEADER_VERSION: u32 = 0x21048000;
+    const HEADER_BITS: u32 = 0x17031abe;
+    const HEADER_TIME: u32 = 0x66bca309;
+
+    // Block 856740 holds thousands of transactions and the explorer doesn't
+    // hand out the merkle branch a miner would have been given, so these two
+    // nodes are made up. They are only here to check that the branch is passed
+    // on unchanged, so their bytes are not symmetric.
+    const MERKLE_BRANCH: [&str; 2] = [
+        "00112233445566778899aabbccddeeff0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        "1a2b3c4d5e6f708192a3b4c5d6e7f8090a1b2c3d4e5f60718293a4b5c6d7e8f9",
+    ];
+
+    fn real_block_job() -> JobUpdate<'static> {
+        let notify = format!(
+            r#"{{"id":null,"method":"mining.notify","params":["6a1f2f3c","{}","{}","{}",["{}","{}"],"{:08x}","{:08x}","{:08x}",true]}}"#,
+            PREV_HASH_STRATUM,
+            COINBASE_1,
+            COINBASE_2,
+            MERKLE_BRANCH[0],
+            MERKLE_BRANCH[1],
+            HEADER_VERSION,
+            HEADER_BITS,
+            HEADER_TIME,
+        );
+        let mut job = job_update_from_notify(&notify, EXTRANONCE1, EXTRANONCE2_SIZE);
+        // Pin the timestamps so the conversions below are reproducible.
+        job.timestamp = DateTime::from_timestamp(HEADER_TIME as i64, 0).unwrap();
+        job.time_connected = DateTime::from_timestamp(HEADER_TIME as i64 - 60, 0).unwrap();
+        job
+    }
+
+    #[test]
+    fn test_real_block_raw_coinbase() {
+        let job = real_block_job();
+        // Putting the parts back together gives the coinbase transaction that
+        // ended up in the block.
+        assert_eq!(encode_hex(&job.raw_coinbase()), COINBASE_RAW);
+        let coinbase = job.coinbase().expect("the coinbase should deserialize");
+        assert_eq!(coinbase.compute_txid().to_string(), COINBASE_TXID);
+    }
+
+    #[test]
+    fn test_real_block_coinbase_info() {
+        let info = real_block_job().coinbase_info();
+        assert_eq!(info.height, BLOCK_HEIGHT);
+        assert_eq!(info.tag, COINBASE_TAG);
+        assert_eq!(info.value_sum, COINBASE_VALUE);
+        assert_eq!(info.output_count, COINBASE_OUTPUT_COUNT);
+        assert_eq!(encode_hex(&info.raw), COINBASE_RAW);
+    }
+
+    #[test]
+    fn test_real_block_prev_block_hash() {
+        // The prev hash a pool sends has the bytes of every four byte word
+        // swapped. Undoing that has to give the hash of the previous block as
+        // an explorer shows it.
+        let job = real_block_job();
+        assert_eq!(job.prev_block_hash().to_string(), PREV_HASH_DISPLAYED);
+    }
+
+    #[test]
+    fn test_real_block_job_update_json() {
+        let job = real_block_job();
+        let json = serde_json::to_value(JobUpdateJson::from(job)).unwrap();
+
+        // The web page in www/index.html reads these fields by name.
+        for field in [
+            "pool_name",
+            "prev_hash",
+            "coinbase_tag",
+            "height",
+            "coinbase_sum",
+            "job_timestamp",
+            "merkle_branches",
+            "clean_jobs",
+        ] {
+            assert!(
+                json.get(field).is_some(),
+                "the JSON is missing the field {} that the web page reads",
+                field
+            );
+        }
+
+        assert_eq!(json["pool_name"], "test pool");
+        assert_eq!(json["prev_hash"], PREV_HASH_DISPLAYED);
+        assert_eq!(json["coinbase_tag"], COINBASE_TAG);
+        assert_eq!(json["height"], BLOCK_HEIGHT);
+        assert_eq!(json["coinbase_sum"], COINBASE_VALUE);
+        assert_eq!(json["job_timestamp"], HEADER_TIME);
+        assert_eq!(json["header_version"], HEADER_VERSION);
+        assert_eq!(json["header_bits"], HEADER_BITS);
+        assert_eq!(json["header_time"], HEADER_TIME);
+        assert_eq!(json["clean_jobs"], true);
+        assert_eq!(
+            json["merkle_branches"],
+            serde_json::json!([MERKLE_BRANCH[0], MERKLE_BRANCH[1]])
+        );
+    }
+
+    #[test]
+    fn test_real_block_new_job_update() {
+        let job = real_block_job();
+        let row = NewJobUpdate::from(job.clone());
+
+        assert_eq!(row.timestamp, job.timestamp.naive_utc());
+        assert_eq!(row.pool, "test pool");
+        assert_eq!(
+            row.merkle_branches,
+            vec![
+                decode_hex(MERKLE_BRANCH[0]).unwrap(),
+                decode_hex(MERKLE_BRANCH[1]).unwrap(),
+            ]
+        );
+        assert_eq!(row.header_version, HEADER_VERSION as i64);
+        assert_eq!(row.header_bits, HEADER_BITS as i64);
+        assert_eq!(row.header_time, HEADER_TIME as i64);
+        assert_eq!(row.header_prev_hash, PREV_HASH_DISPLAYED);
+        assert!(row.clean_jobs);
+        assert_eq!(row.extranonce1, decode_hex(EXTRANONCE1).unwrap());
+        assert_eq!(row.extranonce2_size, EXTRANONCE2_SIZE as i32);
+        assert_eq!(encode_hex(&row.coinbase_raw), COINBASE_RAW);
+        assert_eq!(row.coinbase_tag, COINBASE_TAG);
+        assert_eq!(row.coinbase_value, COINBASE_VALUE as i64);
+        assert_eq!(row.coinbase_height, BLOCK_HEIGHT as i64);
+        assert_eq!(row.coinbase_output_count, COINBASE_OUTPUT_COUNT);
+    }
+
+    #[test]
+    fn test_age_and_time_connected_seconds() {
+        let mut job = real_block_job();
+        let now = Utc::now();
+        job.timestamp = now;
+        job.time_connected = now;
+        assert_eq!(job.age(), 0);
+        assert_eq!(job.time_connected_seconds(), 0);
+
+        job.timestamp = now - TimeDelta::seconds(5);
+        job.time_connected = now - TimeDelta::seconds(90);
+        // Some time passes while the test runs, so allow for a second of slack.
+        assert!((5..=6).contains(&job.age()), "age was {}", job.age());
+        assert!(
+            (90..=91).contains(&job.time_connected_seconds()),
+            "time connected was {}",
+            job.time_connected_seconds()
         );
     }
 }
