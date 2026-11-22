@@ -28,6 +28,9 @@ const USER_AGENT: &str = "stratum-observer";
 const STRATUM_JOB_TIMEOUT_SECONDS: u64 = 60;
 /// The default max lifetime of a connection to a stratum server.
 const STRATUM_CONNECTION_MAX_LIFETIME_SECONDS: u32 = 590; // just below 10 minutes as some pools disconnect after 10 minutes
+/// How long to wait before handing a pool whose address we could not work out
+/// back to the caller, so it doesn't retry in a tight loop.
+const ENDPOINT_RETRY_DELAY_SECONDS: u64 = 3;
 
 /// Why the client gives up on a connection to a pool.
 #[derive(Debug, PartialEq, Eq)]
@@ -114,8 +117,30 @@ impl Client<'static> {
     }
 
     pub async fn run(pool: &Pool, job_sender: Sender<JobUpdate<'static>>) {
-        // TODO: handle errors
-        let socket = pool.endpoint.to_socket_addrs().unwrap().next().unwrap();
+        // We can't do anything without an address to connect to. Return, so
+        // the caller can call us again - the endpoint may be a name that only
+        // resolves later, or the configuration may be fixed in the meantime.
+        let socket = match pool.endpoint.to_socket_addrs() {
+            Ok(mut addresses) => match addresses.next() {
+                Some(socket) => socket,
+                None => {
+                    error!(
+                        "No address found for pool '{}' ({}).",
+                        pool.name, pool.endpoint
+                    );
+                    task::sleep(Duration::from_secs(ENDPOINT_RETRY_DELAY_SECONDS)).await;
+                    return;
+                }
+            },
+            Err(e) => {
+                error!(
+                    "Could not look up the address of pool '{}' ({}): {}",
+                    pool.name, pool.endpoint, e
+                );
+                task::sleep(Duration::from_secs(ENDPOINT_RETRY_DELAY_SECONDS)).await;
+                return;
+            }
+        };
 
         let stream = loop {
             match TcpStream::connect(socket).await {

@@ -171,3 +171,15 @@ async fn the_client_keeps_trying_a_pool_that_refuses_the_connection() {
         "the client should keep trying to reach the pool instead of returning"
     );
 }
+
+/// An endpoint we can not even work out an address for must not take the pool
+/// down: the caller of `run` keeps calling it, so returning lets it try again.
+#[async_std::test]
+async fn the_client_returns_on_an_endpoint_it_can_not_resolve() {
+    let pool = pool("Broken Endpoint", "not-an-endpoint", None);
+    let (job_sender, _jobs) = unbounded();
+
+    timeout(SOON, Client::run(&pool, job_sender))
+        .await
+        .expect("the client should return so that the caller can try again");
+}
