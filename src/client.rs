@@ -195,10 +195,7 @@ impl Client<'static> {
                     }
                 }
             }
-            if let Some(mut self_) = cloned.try_lock() {
-                debug!("Stream with '{}' closed", self_.pool.name);
-                self_.shutdown().await;
-            }
+            Client::shut_down_shared(&cloned).await;
         });
 
         // Outbound message send task
@@ -304,6 +301,16 @@ impl Client<'static> {
                 }
             }
         }
+    }
+
+    /// Shuts down a client that the tasks of a connection share. Waits for the
+    /// client to be free: skipping the shutdown because another task happens to
+    /// hold it would leave us sitting on a connection that is already gone.
+    /// Waiting is safe, as the other tasks only hold the client briefly.
+    async fn shut_down_shared(client: &Arc<Mutex<Client<'static>>>) {
+        let mut client = client.lock().await;
+        debug!("Stopping the client for '{}'", client.pool.name);
+        client.shutdown().await;
     }
 
     async fn parse_message(
@@ -843,6 +850,45 @@ mod tests {
             should_disconnect(TimeDelta::seconds(300), max_lifetime, None, job_timeout),
             None
         );
+    }
+
+    /// The connection to the pool is gone, so the client has to be shut down.
+    /// Another task may well be working with the client at that moment, which
+    /// must not keep the shutdown from happening.
+    #[async_std::test]
+    async fn the_client_is_shut_down_even_while_it_is_busy() {
+        let Harness {
+            client,
+            receiver_outgoing,
+            receiver_shutdown,
+            job_receiver: _job_receiver,
+            sender_incoming: _sender_incoming,
+        } = harness();
+        let client = Arc::new(Mutex::new(client));
+
+        // Somebody else is working with the client right now ...
+        let busy = client.lock().await;
+        let shutting_down = task::spawn({
+            let client = client.clone();
+            async move { Client::shut_down_shared(&client).await }
+        });
+        // ... and hands it over a moment later.
+        task::sleep(Duration::from_millis(100)).await;
+        drop(busy);
+
+        async_std::future::timeout(Duration::from_secs(5), shutting_down)
+            .await
+            .expect("the shutdown should go through once the client is free again");
+
+        assert!(
+            !receiver_shutdown.is_empty(),
+            "the shutdown should have been signalled"
+        );
+        assert!(
+            receiver_outgoing.is_closed(),
+            "the outbound send task should be stopped"
+        );
+        assert!(client.lock().await.shutting_down);
     }
 
     /// Subscribing is only allowed once the client is configured. Being asked

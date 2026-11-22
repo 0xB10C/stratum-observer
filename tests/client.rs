@@ -183,3 +183,24 @@ async fn the_client_returns_on_an_endpoint_it_can_not_resolve() {
         .await
         .expect("the client should return so that the caller can try again");
 }
+
+/// A pool that hangs up on a connection it has been serving. Nothing more is
+/// sent on it afterwards, so only the closed connection itself can tell the
+/// client to stop.
+#[async_std::test]
+async fn the_client_gives_up_when_the_pool_hangs_up_on_a_working_connection() {
+    let server = FakePool::start(Behaviour::CloseAfterHandshake).await;
+    // No max lifetime and no job timeout to fall back on: waiting for either
+    // would take minutes.
+    let pool = pool("Fickle Pool", &server.address, None);
+    let (job_sender, jobs) = unbounded();
+
+    let run = task::spawn(async move { Client::run(&pool, job_sender).await });
+    // The job the pool sent before hanging up still gets through.
+    let job = next_job(&jobs).await;
+    assert_eq!(job.job.job_id, fake_pool::JOB_ID);
+
+    timeout(Duration::from_secs(5), run)
+        .await
+        .expect("the client should notice that the pool hung up");
+}

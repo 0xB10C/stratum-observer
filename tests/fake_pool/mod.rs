@@ -64,6 +64,9 @@ pub enum Configure {
 pub enum Behaviour {
     /// Speak stratum: answer the handshake, then send a difficulty and a job.
     Stratum(Configure),
+    /// Speak stratum and then close the connection once the client is
+    /// authorized and has had its first job.
+    CloseAfterHandshake,
     /// Close the connection again right after accepting it.
     CloseImmediately,
 }
@@ -102,12 +105,14 @@ impl FakePool {
                 .expect("the fake pool should be able to accept a connection");
             let stream = Arc::new(stream);
 
+            let close_after_handshake = behaviour == Behaviour::CloseAfterHandshake;
             let configure = match behaviour {
                 Behaviour::CloseImmediately => {
                     let _ = stream.shutdown(Shutdown::Both);
                     return;
                 }
                 Behaviour::Stratum(configure) => configure,
+                Behaviour::CloseAfterHandshake => Configure::Answer,
             };
 
             // Everything the pool sends goes through one task, so the client
@@ -118,6 +123,11 @@ impl FakePool {
                     if (&*writer).write_all(line.as_bytes()).await.is_err() {
                         break;
                     }
+                }
+                // Nothing left to send. A pool that hangs up does so now, once
+                // the client has everything that was queued for it.
+                if close_after_handshake {
+                    let _ = writer.shutdown(Shutdown::Both);
                 }
             });
 
@@ -130,10 +140,19 @@ impl FakePool {
                 if request_sender.send(line.clone()).await.is_err() {
                     break;
                 }
-                for answer in answers(&line, configure) {
+                let request: json_rpc::StandardRequest = match serde_json::from_str(&line) {
+                    Ok(request) => request,
+                    Err(_) => continue,
+                };
+                for answer in answers(&request, configure) {
                     if answer_sender.send(answer).await.is_err() {
                         break;
                     }
+                }
+                if close_after_handshake && request.method == "mining.authorize" {
+                    // Closing the channel lets the writer send what is still
+                    // queued for the client and hang up afterwards.
+                    answer_sender.close();
                 }
             }
             let _ = gone_sender.send(()).await;
@@ -150,11 +169,7 @@ impl FakePool {
 
 /// What the pool answers a request with. A request it does not know gets no
 /// answer at all.
-fn answers(line: &str, configure: Configure) -> Vec<String> {
-    let request: json_rpc::StandardRequest = match serde_json::from_str(line) {
-        Ok(request) => request,
-        Err(_) => return vec![],
-    };
+fn answers(request: &json_rpc::StandardRequest, configure: Configure) -> Vec<String> {
     let id = request.id;
     match request.method.as_str() {
         "mining.configure" => match configure {
