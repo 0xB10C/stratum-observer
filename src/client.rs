@@ -341,13 +341,16 @@ impl Client<'static> {
     }
 
     pub async fn send_subscribe(&mut self) {
-        loop {
-            if let ClientStatus::Configured = self.status {
-                break;
-            }
+        // Subscribing before the configure is an error, which we report rather
+        // than wait out: nothing here can change the status of the client.
+        let subscribe = self.subscribe(self.message_id, None);
+        match subscribe {
+            Ok(subscribe) => self.send_message(&subscribe).await,
+            Err(e) => warn!(
+                "could not build the subscribe message for '{}': {}",
+                self.pool.name, e
+            ),
         }
-        let subscribe = self.subscribe(self.message_id, None).unwrap();
-        self.send_message(&subscribe).await;
     }
 
     pub async fn send_authorize(&mut self) {
@@ -840,6 +843,35 @@ mod tests {
             should_disconnect(TimeDelta::seconds(300), max_lifetime, None, job_timeout),
             None
         );
+    }
+
+    /// Subscribing is only allowed once the client is configured. Being asked
+    /// to do it earlier is a mistake we report, not one we wait out.
+    #[async_std::test]
+    async fn subscribing_before_the_configure_returns() {
+        let Harness {
+            mut client,
+            receiver_outgoing,
+            receiver_shutdown,
+            job_receiver: _job_receiver,
+            sender_incoming: _sender_incoming,
+        } = harness();
+        assert_eq!(client.status, ClientStatus::Init);
+
+        // Run it elsewhere: a client that waits for a status that can not
+        // change would otherwise hang this test instead of failing it.
+        let subscribing = task::spawn(async move {
+            client.send_subscribe().await;
+            client
+        });
+        let client = async_std::future::timeout(Duration::from_secs(2), subscribing)
+            .await
+            .expect("send_subscribe should return instead of waiting for a status change");
+
+        assert_eq!(client.status, ClientStatus::Init);
+        assert_eq!(client.message_id, 0, "nothing was sent");
+        assert!(receiver_outgoing.is_empty());
+        assert!(receiver_shutdown.is_empty());
     }
 
     #[async_std::test]
