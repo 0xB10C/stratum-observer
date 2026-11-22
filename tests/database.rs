@@ -13,7 +13,7 @@ use common::*;
 use diesel::prelude::*;
 use diesel_migrations::MigrationHarness;
 use std::time::Duration;
-use stratum_observer::database::{db_writer_task, MIGRATIONS};
+use stratum_observer::database::{db_writer_task, DISCARD_BACKLOG_AFTER_ATTEMPTS, MIGRATIONS};
 use stratum_observer::schema::job_updates;
 use stratum_observer::types::{JobUpdate, NewJobUpdate, StoredJobUpdate};
 
@@ -297,6 +297,79 @@ async fn test_an_unreachable_database_is_retried() {
         assert!(
             start.elapsed() < WAIT,
             "the writer should stop once nobody sends jobs anymore"
+        );
+        task::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Nothing has gone wrong when the writer starts, so the first job is written
+/// right away instead of waiting out the delay between two attempts.
+#[async_std::test]
+async fn test_the_first_job_does_not_wait_for_the_retry_delay() {
+    let db_url = match test_database_url() {
+        Some(url) => url,
+        None => return,
+    };
+    let mut conn = connect(&db_url);
+    let pool = unique_name("pool");
+
+    // A delay so long that a writer waiting for it would make this test fail.
+    let retry_delay = Duration::from_secs(300);
+    let (sender, receiver) = async_channel::unbounded();
+    sender.send(real_block_job(&pool)).await.unwrap();
+    let url = db_url.clone();
+    task::spawn(async move { db_writer_task(receiver, &url, retry_delay).await });
+
+    let start = std::time::Instant::now();
+    while rows_of_pool(&mut conn, &pool).is_empty() {
+        assert!(
+            start.elapsed() < WAIT,
+            "the first job should be written without waiting for the retry delay"
+        );
+        task::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The jobs waiting for a database that cannot be reached are thrown away at
+/// some point: the channel they sit in has no bound and would grow until the
+/// tool runs out of memory. As long as the database may just be restarting,
+/// they are kept.
+#[async_std::test]
+async fn test_the_backlog_is_thrown_away_only_after_repeated_failures() {
+    // Port 1 is not open, so the writer cannot reach a database at all. No
+    // test database is needed for this.
+    let db_url = "postgres://127.0.0.1:1/nothing".to_string();
+    // Long enough that only a few attempts happen while the test looks at the
+    // jobs still waiting.
+    let retry_delay = Duration::from_millis(200);
+
+    let (sender, receiver) = async_channel::unbounded();
+    for _ in 0..3 {
+        sender
+            .send(real_block_job(&unique_name("pool")))
+            .await
+            .unwrap();
+    }
+    task::spawn(async move { db_writer_task(receiver, &db_url, retry_delay).await });
+
+    // A couple of failed attempts in, the jobs are all still there: the
+    // database may well be back for the next attempt.
+    task::sleep(retry_delay * 2).await;
+    assert_eq!(
+        sender.len(),
+        3,
+        "the jobs should still be waiting after a few failed attempts"
+    );
+
+    // After DISCARD_BACKLOG_AFTER_ATTEMPTS attempts the database has been gone
+    // for a while and the jobs are given up on.
+    let start = std::time::Instant::now();
+    while !sender.is_empty() {
+        assert!(
+            start.elapsed() < WAIT,
+            "the {} jobs should have been thrown away after {} failed attempts",
+            sender.len(),
+            DISCARD_BACKLOG_AFTER_ATTEMPTS,
         );
         task::sleep(Duration::from_millis(20)).await;
     }
