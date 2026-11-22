@@ -66,7 +66,13 @@ pub async fn websocket_sender_task_with_listener(
     let recent_jobs_write = recent_jobs_rwl_arc.clone();
     task::spawn(async move {
         loop {
-            let job = receiver.recv().await.unwrap();
+            let job = match receiver.recv().await {
+                Ok(job) => job,
+                Err(e) => {
+                    info!("Stopped reading jobs for the websocket clients: {}", e);
+                    return;
+                }
+            };
             {
                 // store the most recent job in a map to be able to send
                 // it to newly connecting clients
@@ -74,12 +80,17 @@ pub async fn websocket_sender_task_with_listener(
                 recent_jobs_.insert(job.pool.name.clone(), job.clone());
             }
             if sender.receiver_count() > 0 {
-                sender.broadcast(job.clone()).await.unwrap();
-                debug!(
-                    "broadcast new job by '{}' to {} websocket thread(s)",
-                    job.pool.name,
-                    sender.receiver_count()
-                );
+                match sender.broadcast(job.clone()).await {
+                    Ok(_) => debug!(
+                        "broadcast new job by '{}' to {} websocket thread(s)",
+                        job.pool.name,
+                        sender.receiver_count()
+                    ),
+                    Err(e) => warn!(
+                        "Could not broadcast the job by '{}' to the websocket thread(s): {}",
+                        job.pool.name, e
+                    ),
+                }
             }
         }
     });

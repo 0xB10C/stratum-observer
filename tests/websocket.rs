@@ -17,6 +17,23 @@ const WAIT: Duration = Duration::from_secs(5);
 /// How long a test waits to be sure that nothing else arrives.
 const QUIET: Duration = Duration::from_millis(250);
 
+/// Number of panics that happened anywhere in this test process. A panic in a
+/// spawned task does not fail a test by itself, so a test that wants to know
+/// whether a task panicked counts them.
+static PANICS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn count_panics() -> usize {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            PANICS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            previous_hook(info);
+        }));
+    });
+    PANICS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// A websocket client. It reads the messages on a thread of its own, because
 /// reading from a websocket blocks, and hands them to the test through a
 /// channel.
@@ -300,4 +317,35 @@ async fn test_a_leaving_client_does_not_stop_the_others() {
         joining.next_message().await["pool_name"],
         Value::from(pool.as_str())
     );
+}
+
+#[async_std::test]
+async fn test_closed_job_channel_does_not_crash_the_server() {
+    let panics_before = count_panics();
+    let (addr, sender) = start_server();
+    let warmup = unique_name("warmup");
+
+    sender.send(real_block_job(&warmup)).await.unwrap();
+    wait_until_known(addr, &warmup).await;
+
+    // Nobody sends jobs anymore, for example because the main task stopped.
+    drop(sender);
+    task::sleep(Duration::from_millis(100)).await;
+
+    assert_eq!(
+        count_panics(),
+        panics_before,
+        "the closed job channel should not have made a task panic"
+    );
+
+    // The server should not have gone down over it and still serves the jobs
+    // it knows to a new client.
+    let snapshot = job_snapshot(addr).await;
+    assert_eq!(
+        snapshot.len(),
+        1,
+        "a new client should still get the known job, got {:?}",
+        snapshot
+    );
+    assert_eq!(snapshot[0]["pool_name"], Value::from(warmup.as_str()));
 }
