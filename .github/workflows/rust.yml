@@ -40,3 +40,39 @@ jobs:
       run: cargo test --verbose
       env:
         TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/stratum_observer_test
+
+  mutants:
+
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: stratum_observer_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install libpq
+      run: sudo apt-get install -y libpq-dev
+    - uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-mutants
+    - name: Run mutation testing
+      run: cargo mutants -j 2 --no-shuffle -vV
+      env:
+        TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/stratum_observer_test
+    - name: Keep the results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: mutants-out
+        path: mutants.out
