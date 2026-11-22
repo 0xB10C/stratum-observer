@@ -253,7 +253,7 @@ impl Client<'static> {
                                 self_.pool.name, STRATUM_JOB_TIMEOUT_SECONDS
                             ),
                         }
-                        self_.shutdown().await;
+                        self_.shutdown();
                         break;
                     }
                 }
@@ -310,7 +310,7 @@ impl Client<'static> {
     async fn shut_down_shared(client: &Arc<Mutex<Client<'static>>>) {
         let mut client = client.lock().await;
         debug!("Stopping the client for '{}'", client.pool.name);
-        client.shutdown().await;
+        client.shutdown();
     }
 
     async fn parse_message(
@@ -341,7 +341,7 @@ impl Client<'static> {
         debug!("sending to {}: {}", self.pool.name, content);
         if let Err(e) = self.sender_outgoing.send(format!("{}\n", content)).await {
             warn!("could not send message to '{}': {}", self.pool.name, e);
-            self.shutdown().await;
+            self.shutdown();
         } else {
             self.message_id += 1;
         }
@@ -379,15 +379,24 @@ impl Client<'static> {
         // configure message.
         self.status = ClientStatus::Configured;
     }
+}
 
-    pub async fn shutdown(&mut self) {
+impl<'a> Client<'a> {
+    /// Stops the client: the tasks around the connection wind down and
+    /// [Client::run] returns, so the caller can open a new connection. Takes
+    /// no await, so the message handlers can call it too.
+    pub fn shutdown(&mut self) {
         if !self.shutting_down {
             self.sender_outgoing.close();
             self.receiver_incoming.close();
-            self.sender_shutdown
-                .send(true)
-                .await
-                .expect("Could not send shutdown");
+            // The channel takes one shutdown and we only ever send one, so an
+            // error here means nobody is waiting for it any more.
+            if let Err(e) = self.sender_shutdown.try_send(true) {
+                debug!(
+                    "Nobody to tell that the client for '{}' is stopping: {}",
+                    self.pool.name, e
+                );
+            }
             self.shutting_down = true;
         }
     }
@@ -426,8 +435,19 @@ impl<'a> IsClient<'a> for Client<'a> {
             extranonce2_size: self.extranonce2_size,
             time_connected: self.time_connected,
         };
-        if let Err(e) = self.job_sender.try_send(job_update) {
-            error!("Failed to send JobUpdate for {}: {}", self.pool.name, e);
+        match self.job_sender.try_send(job_update) {
+            Ok(()) => {}
+            // Nobody is reading the jobs any more, so there is no point in
+            // staying connected to the pool and reporting this for every job
+            // that comes in.
+            Err(async_channel::TrySendError::Closed(_)) => {
+                error!(
+                    "Nobody is reading the jobs of {} any more: stopping the client",
+                    self.pool.name
+                );
+                self.shutdown();
+            }
+            Err(e) => error!("Failed to send JobUpdate for {}: {}", self.pool.name, e),
         }
         Ok(())
     }
@@ -849,6 +869,33 @@ mod tests {
         assert_eq!(
             should_disconnect(TimeDelta::seconds(300), max_lifetime, None, job_timeout),
             None
+        );
+    }
+
+    /// Handing on the jobs is the whole point of the connection, so a client
+    /// whose jobs go nowhere stops rather than reporting the same problem for
+    /// every job that comes in.
+    #[test]
+    fn a_client_whose_jobs_go_nowhere_stops() {
+        let mut h = harness();
+        h.client.status = ClientStatus::Configured;
+        h.client
+            .handle_message(message(SUBSCRIBE_RESPONSE))
+            .expect("a subscribe response should be handled");
+        h.job_receiver.close();
+
+        h.client
+            .handle_message(message(NOTIFY))
+            .expect("the notify itself is fine");
+
+        assert!(h.client.shutting_down);
+        assert!(
+            !h.receiver_shutdown.is_empty(),
+            "the shutdown should have been signalled"
+        );
+        assert!(
+            h.receiver_outgoing.is_closed(),
+            "the outbound send task should be stopped"
         );
     }
 

@@ -204,3 +204,18 @@ async fn the_client_gives_up_when_the_pool_hangs_up_on_a_working_connection() {
         .await
         .expect("the client should notice that the pool hung up");
 }
+
+/// The jobs are the whole point of a connection, so a client whose jobs go
+/// nowhere stops and lets the caller decide what to do.
+#[async_std::test]
+async fn the_client_stops_when_nobody_listens_for_its_jobs() {
+    let server = FakePool::start(Behaviour::Stratum(Configure::Answer)).await;
+    // No max lifetime: only the jobs going nowhere can end this run.
+    let pool = pool("Fake Pool", &server.address, None);
+    let (job_sender, jobs) = unbounded::<JobUpdate<'static>>();
+    drop(jobs);
+
+    timeout(SOON, Client::run(&pool, job_sender))
+        .await
+        .expect("the client should stop once there is nobody to send jobs to");
+}
