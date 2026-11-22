@@ -54,7 +54,7 @@ pub struct Client<'a> {
     shutting_down: bool,
 }
 
-impl<'a> Client<'static> {
+impl Client<'static> {
     /// Builds a client that talks to a pool through the given channels. [Self::run]
     /// wires the channels up to a TCP connection; tests can hand the client
     /// channels of their own and feed stratum messages in without a socket.
