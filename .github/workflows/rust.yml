@@ -14,11 +14,29 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: stratum_observer_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
     - uses: actions/checkout@v4
+    - name: Install libpq
+      run: sudo apt-get install -y libpq-dev
     - name: check fmt
       run: cargo fmt --check
     - name: Build
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
+      env:
+        TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/stratum_observer_test
