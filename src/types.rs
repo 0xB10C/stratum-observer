@@ -3,7 +3,7 @@ use crate::utils::{bip34_coinbase_block_height, encode_hex, extract_coinbase_str
 use bitcoin::consensus::encode::Error as ConsensusError;
 use bitcoin::hashes::sha256d::Hash;
 use chrono::prelude::*;
-use diesel::Insertable;
+use diesel::{Insertable, Queryable, Selectable};
 use log::warn;
 use serde::{Deserialize, Serialize};
 use sv1_api::server_to_client;
@@ -68,6 +68,29 @@ impl From<JobUpdate<'_>> for NewJobUpdate {
             coinbase_output_count: coinbase_info.output_count,
         }
     }
+}
+
+/// A job update as it is stored in the database. Reading rows back needs the
+/// columns in the order the table has them.
+#[derive(Debug, Clone, PartialEq, Queryable, Selectable)]
+#[diesel(table_name = job_updates)]
+pub struct StoredJobUpdate {
+    pub id: i32,
+    pub timestamp: chrono::NaiveDateTime,
+    pub pool: String,
+    pub merkle_branches: Vec<Option<Vec<u8>>>,
+    pub header_version: i64,
+    pub header_bits: i64,
+    pub header_time: i64,
+    pub header_prev_hash: String,
+    pub extranonce1: Vec<u8>,
+    pub extranonce2_size: i32,
+    pub clean_jobs: bool,
+    pub coinbase_raw: Vec<u8>,
+    pub coinbase_value: i64,
+    pub coinbase_output_count: i32,
+    pub coinbase_tag: String,
+    pub coinbase_height: i64,
 }
 
 #[derive(Serialize)]
