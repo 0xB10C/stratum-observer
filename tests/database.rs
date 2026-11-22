@@ -302,6 +302,69 @@ async fn test_an_unreachable_database_is_retried() {
     }
 }
 
+/// Cuts the connections of everything that calls itself by the given
+/// application name, the way a restart of the database or a firewall does.
+/// Returns how many connections were cut.
+fn terminate_connections(conn: &mut PgConnection, application_name: &str) -> usize {
+    #[derive(diesel::QueryableByName)]
+    struct Terminated {
+        #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Bool>)]
+        terminated: Option<bool>,
+    }
+
+    diesel::sql_query(format!(
+        "SELECT pg_terminate_backend(pid) AS terminated FROM pg_stat_activity \
+         WHERE pid <> pg_backend_pid() AND datname = current_database() \
+         AND application_name = '{}'",
+        application_name
+    ))
+    .load::<Terminated>(conn)
+    .expect("cutting the connections should work")
+    .iter()
+    .filter(|row| row.terminated == Some(true))
+    .count()
+}
+
+/// A connection to the database can be cut while the tool runs: the database
+/// is restarted, or something in between drops the connection. The writer has
+/// to open a new one, instead of giving up on every job from then on.
+#[async_std::test]
+async fn test_the_writer_reconnects_after_the_connection_was_cut() {
+    let db_url = match test_database_url() {
+        Some(url) => url,
+        None => return,
+    };
+    let mut conn = connect(&db_url);
+    let pool = unique_name("pool");
+    // The writer says who it is on its connection, so this test only cuts its
+    // own connection and leaves the tests running next to it alone.
+    let application_name = unique_name("writer").replace('-', "_");
+    let writer_url = format!("{}?application_name={}", db_url, application_name);
+
+    let (sender, receiver) = async_channel::unbounded();
+    sender.send(real_block_job(&pool)).await.unwrap();
+    task::spawn(async move { db_writer_task(receiver, &writer_url, RETRY_DELAY).await });
+    wait_for_rows(&mut conn, &pool, 1).await;
+
+    assert_eq!(
+        terminate_connections(&mut conn, &application_name),
+        1,
+        "the connection of the writer should have been cut"
+    );
+
+    // The job that is on its way when the connection is cut goes down with it.
+    // The ones after it are written once the writer has reconnected.
+    sender.send(real_block_job(&pool)).await.unwrap();
+    sender.send(real_block_job(&pool)).await.unwrap();
+
+    let rows = wait_for_rows(&mut conn, &pool, 2).await;
+    assert_eq!(
+        rows.len(),
+        2,
+        "the job sent after the cut should be in the database"
+    );
+}
+
 /// Nothing has gone wrong when the writer starts, so the first job is written
 /// right away instead of waiting out the delay between two attempts.
 #[async_std::test]
