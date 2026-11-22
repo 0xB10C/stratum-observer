@@ -20,7 +20,8 @@ websocket_address = "127.0.0.1:57127"
 ## pools
 # stratum-observer connects to multiple stratum pools. Currently, only
 # stratum v1 pools are supported. Each list entry should have at least
-# an endpoint (host:port), a unique name, a username. A password field
+# an endpoint (host:port), a unique name, a username. At least one pool
+# is needed, and the name and the endpoint must not be empty. A password field
 # is optional. Additionally, a max_lifetime can be specified in seconds
 # after which the pool connection is dropped and a new connection is
 # opened. 

@@ -6,5 +6,6 @@ pkgs.mkShell {
       pkgs.rustc
       pkgs.rustfmt
       pkgs.postgresql
+      pkgs.cargo-mutants
     ];
 }

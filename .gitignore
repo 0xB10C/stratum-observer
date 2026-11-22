@@ -2,3 +2,5 @@
 config.toml
 .env
 *.sqlite
+mutants.out/
+mutants.out.old/
