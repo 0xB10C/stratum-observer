@@ -161,3 +161,70 @@ async fn test_jobs_are_written_to_the_database() {
         rows[0].timestamp.and_utc().timestamp() + 30
     );
 }
+
+/// Makes the database refuse the rows of one pool, so a test can see what the
+/// writer task does with a job it cannot insert. The rows of the other tests
+/// are not touched.
+struct RefusingTrigger {
+    name: String,
+}
+
+impl RefusingTrigger {
+    fn install(conn: &mut PgConnection, pool_name: &str) -> RefusingTrigger {
+        let name = unique_name("refuse").replace('-', "_");
+        diesel::sql_query(format!(
+            "CREATE FUNCTION {name}() RETURNS trigger AS $$ BEGIN \
+             IF NEW.pool = '{pool_name}' THEN RAISE EXCEPTION 'test: this row is refused'; \
+             END IF; RETURN NEW; END; $$ LANGUAGE plpgsql"
+        ))
+        .execute(conn)
+        .expect("creating the trigger function should work");
+        diesel::sql_query(format!(
+            "CREATE TRIGGER {name} BEFORE INSERT ON job_updates \
+             FOR EACH ROW EXECUTE FUNCTION {name}()"
+        ))
+        .execute(conn)
+        .expect("creating the trigger should work");
+        RefusingTrigger { name }
+    }
+
+    fn remove(self, conn: &mut PgConnection) {
+        let _ =
+            diesel::sql_query(format!("DROP TRIGGER {} ON job_updates", self.name)).execute(conn);
+        let _ = diesel::sql_query(format!("DROP FUNCTION {}()", self.name)).execute(conn);
+    }
+}
+
+#[async_std::test]
+async fn test_a_refused_job_does_not_drop_the_queued_jobs() {
+    let db_url = match test_database_url() {
+        Some(url) => url,
+        None => return,
+    };
+    let mut conn = connect(&db_url);
+    let pool = unique_name("pool");
+    let refused_pool = format!("{}-refused", pool);
+    let trigger = RefusingTrigger::install(&mut conn, &refused_pool);
+
+    // All three jobs are queued before the task starts, so the good job that
+    // comes last is waiting in the channel while the refused one fails.
+    let (sender, receiver) = async_channel::unbounded();
+    sender.send(real_block_job(&pool)).await.unwrap();
+    sender.send(real_block_job(&refused_pool)).await.unwrap();
+    sender.send(real_block_job(&pool)).await.unwrap();
+    let url = db_url.clone();
+    task::spawn(async move { db_writer_task(receiver, &url, RETRY_DELAY).await });
+
+    let rows = wait_for_rows(&mut conn, &pool, 2).await;
+    assert_eq!(
+        rows.len(),
+        2,
+        "only the refused job should be lost, not the ones queued behind it"
+    );
+    assert!(
+        rows_of_pool(&mut conn, &refused_pool).is_empty(),
+        "the refused job should not be in the database"
+    );
+
+    trigger.remove(&mut conn);
+}
