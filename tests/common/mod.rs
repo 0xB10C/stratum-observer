@@ -119,3 +119,20 @@ pub fn unique_name(prefix: &str) -> String {
         COUNTER.fetch_add(1, Ordering::Relaxed),
     )
 }
+
+/// Number of panics that happened anywhere in this test process. A panic in a
+/// spawned task does not fail a test by itself, so a test that wants to know
+/// whether a task panicked counts them.
+static PANICS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn count_panics() -> usize {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            PANICS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            previous_hook(info);
+        }));
+    });
+    PANICS.load(std::sync::atomic::Ordering::SeqCst)
+}

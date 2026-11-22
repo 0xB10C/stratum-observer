@@ -73,7 +73,8 @@ pub async fn db_writer_task(
             let update = match receiver.recv().await {
                 Ok(update) => update,
                 Err(e) => {
-                    panic!("Could not receive job from database receiver: {}", e);
+                    info!("Stopped writing jobs to the database: {}", e);
+                    return;
                 }
             };
 

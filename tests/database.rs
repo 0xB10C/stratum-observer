@@ -7,6 +7,7 @@
 
 mod common;
 
+use async_std::future::timeout;
 use async_std::task;
 use common::*;
 use diesel::prelude::*;
@@ -227,4 +228,33 @@ async fn test_a_refused_job_does_not_drop_the_queued_jobs() {
     );
 
     trigger.remove(&mut conn);
+}
+
+#[async_std::test]
+async fn test_closed_job_channel_stops_the_writer() {
+    let db_url = match test_database_url() {
+        Some(url) => url,
+        None => return,
+    };
+    let mut conn = connect(&db_url);
+    let pool = unique_name("pool");
+    let panics_before = count_panics();
+
+    let (sender, receiver) = async_channel::unbounded();
+    sender.send(real_block_job(&pool)).await.unwrap();
+    let url = db_url.clone();
+    let writer = task::spawn(async move { db_writer_task(receiver, &url, RETRY_DELAY).await });
+
+    wait_for_rows(&mut conn, &pool, 1).await;
+
+    // Nobody sends jobs anymore, for example because the main task stopped.
+    drop(sender);
+    timeout(WAIT, writer)
+        .await
+        .expect("the writer should stop once nobody sends jobs anymore");
+    assert_eq!(
+        count_panics(),
+        panics_before,
+        "the closed job channel should not have made the writer panic"
+    );
 }

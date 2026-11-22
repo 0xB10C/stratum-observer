@@ -17,23 +17,6 @@ const WAIT: Duration = Duration::from_secs(5);
 /// How long a test waits to be sure that nothing else arrives.
 const QUIET: Duration = Duration::from_millis(250);
 
-/// Number of panics that happened anywhere in this test process. A panic in a
-/// spawned task does not fail a test by itself, so a test that wants to know
-/// whether a task panicked counts them.
-static PANICS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-fn count_panics() -> usize {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let previous_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            PANICS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            previous_hook(info);
-        }));
-    });
-    PANICS.load(std::sync::atomic::Ordering::SeqCst)
-}
-
 /// A websocket client. It reads the messages on a thread of its own, because
 /// reading from a websocket blocks, and hands them to the test through a
 /// channel.
