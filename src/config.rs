@@ -140,6 +140,7 @@ impl From<toml::de::Error> for ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::error::Error as _;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -360,5 +361,35 @@ mod tests {
         )
         .expect_err("a pool without an endpoint should be an error");
         assert!(matches!(error, ConfigError::MissingPoolEndpoint(ref name) if name == "Example"));
+    }
+
+    #[test]
+    fn a_missing_config_file_is_an_error() {
+        let mut path = env::temp_dir();
+        path.push(format!(
+            "stratum-observer-config-test-{}-missing.toml",
+            std::process::id()
+        ));
+        let error = load_config_from_path(&path.to_string_lossy())
+            .expect_err("a file that is not there should be an error");
+        assert!(matches!(error, ConfigError::ReadError(_)));
+        assert!(error.to_string().contains("could not be read"));
+        assert!(error.source().is_some());
+    }
+
+    #[test]
+    fn a_config_that_is_not_toml_is_an_error() {
+        let error = Config::from_toml_str("this is not a configuration file")
+            .expect_err("text that is not TOML should be an error");
+        assert!(matches!(error, ConfigError::TomlError(_)));
+        assert!(error.to_string().contains("could not be parsed"));
+        assert!(error.source().is_some());
+    }
+
+    #[test]
+    fn a_duplicate_pool_name_error_names_the_pool_and_has_no_source() {
+        let error = ConfigError::DuplicatePoolName(String::from("Example"));
+        assert!(error.to_string().contains("Example"));
+        assert!(error.source().is_none());
     }
 }
