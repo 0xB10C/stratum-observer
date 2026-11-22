@@ -10,16 +10,27 @@ use std::collections::BTreeMap;
 use std::net::TcpListener;
 use tungstenite::accept;
 
+/// Binds a websocket server to the given address and sends all jobs it
+/// receives to the connected websocket clients.
 pub async fn websocket_sender_task(receiver: Receiver<JobUpdate<'static>>, ws_addr: &str) {
     info!("Starting websocket server on {}", ws_addr);
-    let server = match TcpListener::bind(ws_addr) {
-        Ok(s) => s,
+    let listener = match TcpListener::bind(ws_addr) {
+        Ok(l) => l,
         Err(e) => {
             error!("Could not start websocket server on {}: {}", ws_addr, e);
             return;
         }
     };
+    websocket_sender_task_with_listener(receiver, listener).await
+}
 
+/// Sends all jobs it receives to the clients connecting to the already bound
+/// listener. Tests use this to listen on a port picked by the operating
+/// system.
+pub async fn websocket_sender_task_with_listener(
+    receiver: Receiver<JobUpdate<'static>>,
+    listener: TcpListener,
+) {
     // a broadcast channel is used to fan-out the jobs to all websocket
     // subscribers. One 'inactive' receiver is just used for cloning new
     // broadcast receivers. The sender overflows to make sure we allways
@@ -52,90 +63,90 @@ pub async fn websocket_sender_task(receiver: Receiver<JobUpdate<'static>>, ws_ad
         }
     });
 
-    for stream in server.incoming() {
-        match stream {
-            Ok(stream) => {
-                let mut r = inactive_broadcast_receiver.clone().activate();
-                let recent_jobs_read = recent_jobs_rwl_arc.clone();
-                task::spawn(async move {
-                    match accept(stream) {
-                        Ok(mut websocket) => {
-                            debug!(
-                                "Accepted new websocket connection: connections={}",
-                                r.receiver_count()
-                            );
-
-                            // send recent jobs when websocket is opened
-                            {
-                                let recent_jobs_ = recent_jobs_read.read().await;
-                                for job in recent_jobs_.values() {
-                                    // TODO: deduplicate sending jobs into websocket code
-                                    match serde_json::to_string::<JobUpdateJson>(
-                                        &job.clone().into(),
-                                    ) {
-                                        Ok(msg) => {
-                                            if let Err(e) =
-                                                websocket.send(tungstenite::Message::Text(msg))
-                                            {
-                                                debug!("Could not send '{}' job update to websocket: {}. Connection probably closed.", job.pool.name, e);
-                                                // Try our best to close and flush the websocket. If we can't,
-                                                // we can't..
-                                                let _ = websocket.close(None);
-                                                let _ = websocket.flush();
-                                                break;
-                                            }
-                                        }
-                                        Err(e) => {
-                                            warn!(
-                                                "Could not serialize JobUpdateJson to JSON: {}",
-                                                e
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-
-                            // continuesly send new jobs
-                            loop {
-                                let job = match r.recv().await {
-                                    Ok(j) => j,
-                                    Err(e) => {
-                                        warn!(
-                                            "Could not receive broadcast-job for websocket: {}",
-                                            e
-                                        );
-                                        break;
-                                    }
-                                };
-                                // TODO: deduplicate sending jobs into websocket code
-                                match serde_json::to_string::<JobUpdateJson>(&job.clone().into()) {
-                                    Ok(msg) => {
-                                        if let Err(e) =
-                                            websocket.send(tungstenite::Message::Text(msg))
-                                        {
-                                            debug!("Could not send '{}' job update to websocket: {}. Connection probably closed.", job.pool.name, e);
-                                            // Try our best to close and flush the websocket. If we can't,
-                                            // we can't..
-                                            break;
-                                        }
-                                    }
-                                    Err(e) => {
-                                        warn!("Could not serialize JobUpdateJson to JSON: {}", e)
-                                    }
-                                }
-                            }
-                            let _ = websocket.close(None);
-                            let _ = websocket.flush();
-                        }
-                        Err(e) => {
-                            warn!("Failed to open websocket on incoming connection: {}", e);
-                        }
+    // Waiting for a new connection blocks, so it happens on a thread of its
+    // own. Otherwise it would block one of the threads the async tasks run on.
+    let (stream_sender, stream_receiver) = async_channel::unbounded();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    if stream_sender.send_blocking(stream).is_err() {
+                        debug!("Nobody handles new websocket connections anymore, stop listening");
+                        return;
                     }
-                });
-            }
-            Err(e) => {
-                warn!("Failed to accept incomming TCP connection: {}", e);
+                }
+                Err(e) => {
+                    warn!("Failed to accept incomming TCP connection: {}", e);
+                }
             }
         }
+    });
+
+    while let Ok(stream) = stream_receiver.recv().await {
+        let mut r = inactive_broadcast_receiver.clone().activate();
+        let recent_jobs_read = recent_jobs_rwl_arc.clone();
+        task::spawn(async move {
+            match accept(stream) {
+                Ok(mut websocket) => {
+                    debug!(
+                        "Accepted new websocket connection: connections={}",
+                        r.receiver_count()
+                    );
+
+                    // send recent jobs when websocket is opened
+                    {
+                        let recent_jobs_ = recent_jobs_read.read().await;
+                        for job in recent_jobs_.values() {
+                            // TODO: deduplicate sending jobs into websocket code
+                            match serde_json::to_string::<JobUpdateJson>(&job.clone().into()) {
+                                Ok(msg) => {
+                                    if let Err(e) = websocket.send(tungstenite::Message::Text(msg))
+                                    {
+                                        debug!("Could not send '{}' job update to websocket: {}. Connection probably closed.", job.pool.name, e);
+                                        // Try our best to close and flush the websocket. If we can't,
+                                        // we can't..
+                                        let _ = websocket.close(None);
+                                        let _ = websocket.flush();
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("Could not serialize JobUpdateJson to JSON: {}", e)
+                                }
+                            }
+                        }
+                    }
+
+                    // continuesly send new jobs
+                    loop {
+                        let job = match r.recv().await {
+                            Ok(j) => j,
+                            Err(e) => {
+                                warn!("Could not receive broadcast-job for websocket: {}", e);
+                                break;
+                            }
+                        };
+                        // TODO: deduplicate sending jobs into websocket code
+                        match serde_json::to_string::<JobUpdateJson>(&job.clone().into()) {
+                            Ok(msg) => {
+                                if let Err(e) = websocket.send(tungstenite::Message::Text(msg)) {
+                                    debug!("Could not send '{}' job update to websocket: {}. Connection probably closed.", job.pool.name, e);
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Could not serialize JobUpdateJson to JSON: {}", e)
+                            }
+                        }
+                    }
+                    let _ = websocket.close(None);
+                    let _ = websocket.flush();
+                }
+                Err(e) => {
+                    warn!("Failed to open websocket on incoming connection: {}", e);
+                }
+            }
+        });
     }
+    info!("Stopped accepting websocket connections");
 }
