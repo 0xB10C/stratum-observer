@@ -439,7 +439,7 @@ impl<'a> IsClient<'a> for Client<'a> {
         id: u64,
         name: String,
         password: String,
-    ) -> Result<json_rpc::Message, Error> {
+    ) -> Result<json_rpc::Message, Error<'_>> {
         match self.status() {
             ClientStatus::Init => Err(Error::IncorrectClientStatus("mining.authorize".to_string())),
             _ => {
@@ -449,7 +449,7 @@ impl<'a> IsClient<'a> for Client<'a> {
         }
     }
 
-    fn last_notify(&self) -> Option<server_to_client::Notify> {
+    fn last_notify(&self) -> Option<server_to_client::Notify<'_>> {
         self.last_notify.clone()
     }
 
