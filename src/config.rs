@@ -18,22 +18,39 @@ pub struct Config {
     pub pools: Vec<Pool>,
 }
 
+impl Config {
+    /// Parses a configuration from a TOML string and checks that it makes sense.
+    pub fn from_toml_str(config_string: &str) -> Result<Config, ConfigError> {
+        let config: Config = toml::from_str(config_string)?;
+        config.check()?;
+        Ok(config)
+    }
+
+    fn check(&self) -> Result<(), ConfigError> {
+        // check for unique pool names
+        let mut pool_names = BTreeSet::new();
+        for pool in self.pools.iter() {
+            if !pool_names.insert(&pool.name) {
+                return Err(ConfigError::DuplicatePoolName(pool.name.clone()));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Reads the configuration from the file at the given path.
+pub fn load_config_from_path(path: &str) -> Result<Config, ConfigError> {
+    info!("Reading configuration file from {}.", path);
+    let config_string = fs::read_to_string(path)?;
+    Config::from_toml_str(&config_string)
+}
+
+/// Reads the configuration from the file the CONFIG_FILE environment variable
+/// points to, falling back to config.toml.
 pub fn load_config() -> Result<Config, ConfigError> {
     let config_file_path =
         env::var(ENVVAR_CONFIG_FILE).unwrap_or_else(|_| DEFAULT_CONFIG.to_string());
-    info!("Reading configuration file from {}.", config_file_path);
-    let config_string = fs::read_to_string(config_file_path)?;
-    let config: Config = toml::from_str(&config_string)?;
-
-    // check for unique pool names
-    let mut pool_names = BTreeSet::new();
-    for pool in config.pools.iter() {
-        if !pool_names.insert(&pool.name) {
-            return Err(ConfigError::DuplicatePoolName(pool.name.clone()));
-        }
-    }
-
-    Ok(config)
+    load_config_from_path(&config_file_path)
 }
 
 #[derive(Debug)]
@@ -86,14 +103,28 @@ impl From<toml::de::Error> for ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const FILENAME_EXAMPLE_CONFIG: &str = "config-example.toml";
+
+    /// Writes a configuration file into the temporary directory and returns
+    /// its path. The file name is unique, so tests can run in parallel.
+    fn write_config_file(contents: &str) -> PathBuf {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let mut path = env::temp_dir();
+        path.push(format!(
+            "stratum-observer-config-test-{}-{}.toml",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, contents).expect("should be able to write a temporary config file");
+        path
+    }
 
     #[test]
     fn load_example_config() {
-        use std::env;
-
-        const FILENAME_EXAMPLE_CONFIG: &str = "config-example.toml";
-        env::set_var(ENVVAR_CONFIG_FILE, FILENAME_EXAMPLE_CONFIG);
-        let config = load_config().expect(&format!(
+        let config = load_config_from_path(FILENAME_EXAMPLE_CONFIG).expect(&format!(
             "We should be able to load the {} file.",
             FILENAME_EXAMPLE_CONFIG
         ));
@@ -113,6 +144,41 @@ mod tests {
         assert_eq!(config.pools[0].password, Some(String::from("45324")));
     }
 
+    /// This is the only test that touches the CONFIG_FILE environment
+    /// variable. Keep it that way, otherwise the tests race with each other.
+    #[test]
+    fn load_config_from_envvar_path() {
+        let path = write_config_file(
+            r#"
+            pools = [
+                { endpoint = "stratum.example.com:1234", name = "From the envvar", user = "username" },
+            ]
+        "#,
+        );
+        env::set_var(ENVVAR_CONFIG_FILE, &path);
+        let config = load_config().expect("we should be able to load the config file");
+        assert_eq!(config.pools[0].name, "From the envvar");
+    }
+
+    #[test]
+    fn load_config_from_a_file() {
+        let path = write_config_file(
+            r#"
+            postgresql_url = "postgres://user:password@host:1234/dbname"
+            pools = [
+                { endpoint = "stratum.example.com:1234", name = "From a file", user = "username" },
+            ]
+        "#,
+        );
+        let config = load_config_from_path(&path.to_string_lossy())
+            .expect("we should be able to load the config file");
+        assert_eq!(
+            config.postgresql_url,
+            Some(String::from("postgres://user:password@host:1234/dbname"))
+        );
+        assert_eq!(config.pools[0].name, "From a file");
+    }
+
     #[test]
     fn load_pool_with_max_lifetime_config() {
         let config_string = r#"
@@ -122,7 +188,7 @@ mod tests {
                 { endpoint = "stratum2.example.com:5674", name = "Example2", user = "username2" },
             ]
         "#;
-        let config: Config = toml::from_str(&config_string).unwrap();
+        let config = Config::from_toml_str(config_string).unwrap();
         assert_eq!(config.database_path, Some(String::from("abc")));
         assert_eq!(config.pools[0].endpoint, "stratum.example.com:1234");
         assert_eq!(config.pools[0].name, "Example");
