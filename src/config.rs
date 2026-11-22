@@ -28,6 +28,21 @@ impl Config {
     }
 
     fn check(&self) -> Result<(), ConfigError> {
+        // there is nothing to observe without pools
+        if self.pools.is_empty() {
+            return Err(ConfigError::NoPools);
+        }
+
+        // check that every pool has a name and an endpoint
+        for pool in self.pools.iter() {
+            if pool.name.trim().is_empty() {
+                return Err(ConfigError::MissingPoolName);
+            }
+            if pool.endpoint.trim().is_empty() {
+                return Err(ConfigError::MissingPoolEndpoint(pool.name.clone()));
+            }
+        }
+
         // check for unique pool names
         let mut pool_names = BTreeSet::new();
         for pool in self.pools.iter() {
@@ -65,6 +80,9 @@ pub enum ConfigError {
     TomlError(toml::de::Error),
     ReadError(io::Error),
     DuplicatePoolName(String),
+    NoPools,
+    MissingPoolName,
+    MissingPoolEndpoint(String),
 }
 
 impl fmt::Display for ConfigError {
@@ -81,6 +99,15 @@ impl fmt::Display for ConfigError {
             ConfigError::DuplicatePoolName(name) => {
                 write!(f, "duplicate pool name: {}", name)
             }
+            ConfigError::NoPools => {
+                write!(f, "the configuration does not list any pools")
+            }
+            ConfigError::MissingPoolName => {
+                write!(f, "a pool does not have a name")
+            }
+            ConfigError::MissingPoolEndpoint(name) => {
+                write!(f, "the pool {} does not have an endpoint", name)
+            }
         }
     }
 }
@@ -90,7 +117,10 @@ impl error::Error for ConfigError {
         match *self {
             ConfigError::TomlError(ref e) => Some(e),
             ConfigError::ReadError(ref e) => Some(e),
-            ConfigError::DuplicatePoolName(_) => None,
+            ConfigError::DuplicatePoolName(_)
+            | ConfigError::NoPools
+            | ConfigError::MissingPoolName
+            | ConfigError::MissingPoolEndpoint(_) => None,
         }
     }
 }
@@ -264,5 +294,71 @@ mod tests {
             Some(String::from("127.0.0.1:57127"))
         );
         assert_eq!(config.pools[0].name, "Example");
+    }
+
+    #[test]
+    fn two_pools_with_the_same_name_are_rejected() {
+        let error = Config::from_toml_str(
+            r#"
+            pools = [
+                { endpoint = "stratum.example.com:1234", name = "Example", user = "username" },
+                { endpoint = "stratum2.example.com:5674", name = "Example", user = "username2" },
+            ]
+        "#,
+        )
+        .expect_err("two pools with the same name should be an error");
+        assert!(matches!(error, ConfigError::DuplicatePoolName(ref name) if name == "Example"));
+    }
+
+    #[test]
+    fn pools_with_different_names_are_accepted() {
+        let config = Config::from_toml_str(
+            r#"
+            pools = [
+                { endpoint = "stratum.example.com:1234", name = "Example", user = "username" },
+                { endpoint = "stratum2.example.com:5674", name = "Example2", user = "username2" },
+            ]
+        "#,
+        )
+        .expect("two pools with different names should be fine");
+        assert_eq!(config.pools.len(), 2);
+    }
+
+    #[test]
+    fn a_config_without_pools_is_rejected() {
+        let error = Config::from_toml_str(
+            r#"
+            websocket_address = "127.0.0.1:57127"
+            pools = []
+        "#,
+        )
+        .expect_err("a config without pools should be an error");
+        assert!(matches!(error, ConfigError::NoPools));
+    }
+
+    #[test]
+    fn a_pool_without_a_name_is_rejected() {
+        let error = Config::from_toml_str(
+            r#"
+            pools = [
+                { endpoint = "stratum.example.com:1234", name = "  ", user = "username" },
+            ]
+        "#,
+        )
+        .expect_err("a pool without a name should be an error");
+        assert!(matches!(error, ConfigError::MissingPoolName));
+    }
+
+    #[test]
+    fn a_pool_without_an_endpoint_is_rejected() {
+        let error = Config::from_toml_str(
+            r#"
+            pools = [
+                { endpoint = "", name = "Example", user = "username" },
+            ]
+        "#,
+        )
+        .expect_err("a pool without an endpoint should be an error");
+        assert!(matches!(error, ConfigError::MissingPoolEndpoint(ref name) if name == "Example"));
     }
 }
