@@ -12,7 +12,6 @@ use log::info;
 
 #[derive(Debug, Deserialize, PartialEq)]
 pub struct Config {
-    pub database_path: Option<String>,
     pub postgresql_url: Option<String>,
     pub websocket_address: Option<String>,
     pub pools: Vec<Pool>,
@@ -228,14 +227,12 @@ mod tests {
     #[test]
     fn load_pool_with_max_lifetime_config() {
         let config_string = r#"
-            database_path = "abc"
             pools = [
                 { endpoint = "stratum.example.com:1234", name = "Example", user = "username", password = "password123", max_lifetime=1337 },
                 { endpoint = "stratum2.example.com:5674", name = "Example2", user = "username2" },
             ]
         "#;
         let config = Config::from_toml_str(config_string).unwrap();
-        assert_eq!(config.database_path, Some(String::from("abc")));
         assert_eq!(config.pools[0].endpoint, "stratum.example.com:1234");
         assert_eq!(config.pools[0].name, "Example");
         assert_eq!(config.pools[0].user, "username");
@@ -246,5 +243,26 @@ mod tests {
         assert_eq!(config.pools[1].user, "username2");
         assert_eq!(config.pools[1].password, None);
         assert_eq!(config.pools[1].max_lifetime, None);
+    }
+
+    /// Older config files may still contain the database_path setting from
+    /// the time before PostgreSQL. They should keep working.
+    #[test]
+    fn settings_we_do_not_know_are_ignored() {
+        let config = Config::from_toml_str(
+            r#"
+            database_path = "jobs.sqlite"
+            websocket_address = "127.0.0.1:57127"
+            pools = [
+                { endpoint = "stratum.example.com:1234", name = "Example", user = "username" },
+            ]
+        "#,
+        )
+        .expect("a setting we do not know should not be an error");
+        assert_eq!(
+            config.websocket_address,
+            Some(String::from("127.0.0.1:57127"))
+        );
+        assert_eq!(config.pools[0].name, "Example");
     }
 }

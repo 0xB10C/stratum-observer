@@ -32,7 +32,7 @@ async fn main() {
     let enable_database = config.postgresql_url.is_some();
     let enable_websocket = config.websocket_address.is_some();
     if !enable_database && !enable_websocket {
-        warn!("Neither database_path nor websocket_address are set: nothing to do");
+        warn!("Neither postgresql_url nor websocket_address are set: nothing to do");
         exit(3)
     }
 
