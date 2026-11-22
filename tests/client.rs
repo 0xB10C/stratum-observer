@@ -219,3 +219,32 @@ async fn the_client_stops_when_nobody_listens_for_its_jobs() {
         .await
         .expect("the client should stop once there is nobody to send jobs to");
 }
+
+/// A pool may hand out a new extranonce in the middle of a session. From then
+/// on it builds its coinbases with that one.
+#[async_std::test]
+async fn a_new_extranonce_is_used_for_the_jobs_that_follow() {
+    let server = FakePool::start(Behaviour::Stratum(Configure::Answer)).await;
+    let jobs = run_client(pool("Fake Pool", &server.address, Some(15)));
+
+    let first = next_job(&jobs).await;
+    assert_eq!(
+        encode_hex(first.extranonce1.as_ref()),
+        fake_pool::EXTRANONCE1
+    );
+
+    for line in [
+        fake_pool::set_extranonce("aabbccddee", 2),
+        fake_pool::notify(),
+    ] {
+        server
+            .to_client
+            .send(format!("{}\n", line))
+            .await
+            .expect("the pool should be able to send to the client");
+    }
+
+    let second = next_job(&jobs).await;
+    assert_eq!(encode_hex(second.extranonce1.as_ref()), "aabbccddee");
+    assert_eq!(second.extranonce2_size, 2);
+}

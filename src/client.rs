@@ -412,8 +412,21 @@ impl<'a> IsClient<'a> for Client<'a> {
 
     fn handle_set_extranonce(
         &mut self,
-        _conf: &mut server_to_client::SetExtranonce,
+        conf: &mut server_to_client::SetExtranonce,
     ) -> Result<(), Error<'a>> {
+        // These replace what the pool handed out when we subscribed. Every
+        // coinbase from the next job on is built with them, so we have to take
+        // them over - sticking to the old ones would make the coinbases we
+        // report differ from the ones that are being mined.
+        let extranonce1: Vec<u8> = conf.extra_nonce1.clone().into();
+        debug!(
+            "{} handed out a new extranonce1={} with extranonce2_size={}",
+            self.pool.name,
+            utils::encode_hex(&extranonce1),
+            conf.extra_nonce2_size,
+        );
+        self.set_extranonce1(Extranonce::try_from(extranonce1)?);
+        self.set_extranonce2_size(conf.extra_nonce2_size);
         Ok(())
     }
 
@@ -584,6 +597,9 @@ mod tests {
         r#"{"id":1,"error":null,"result":[[["mining.notify","abc"]],"f11f9113",4]}"#;
     /// A pool that has nothing to configure answers with an empty result.
     const CONFIGURE_RESPONSE: &str = r#"{"id":0,"error":null,"result":{}}"#;
+    /// A pool handing out a new extranonce in the middle of a session.
+    const SET_EXTRANONCE: &str =
+        r#"{"id":null,"method":"mining.set_extranonce","params":["aabbccddee",2]}"#;
 
     /// A client plus the ends of its channels a test holds on to. Dropping an
     /// end would close the channel, so they all have to stay alive.
@@ -870,6 +886,34 @@ mod tests {
             should_disconnect(TimeDelta::seconds(300), max_lifetime, None, job_timeout),
             None
         );
+    }
+
+    /// A pool can hand out a new extranonce in the middle of a session. Every
+    /// coinbase from the next job on is built with it, so the client has to
+    /// take it over - keeping the old one would make the coinbases it reports
+    /// differ from the ones that are being mined.
+    #[test]
+    fn a_new_extranonce_replaces_the_one_from_the_subscribe() {
+        let mut h = harness();
+        h.client.status = ClientStatus::Configured;
+        h.client
+            .handle_message(message(SUBSCRIBE_RESPONSE))
+            .expect("a subscribe response should be handled");
+
+        h.client
+            .handle_message(message(SET_EXTRANONCE))
+            .expect("a set_extranonce should be handled");
+
+        assert_eq!(encode_hex(h.client.extranonce1.as_ref()), "aabbccddee");
+        assert_eq!(h.client.extranonce2_size, 2);
+
+        // The next job is reported with the new values.
+        h.client
+            .handle_message(message(NOTIFY))
+            .expect("a notify should be handled");
+        let job = h.job_receiver.try_recv().expect("there should be a job");
+        assert_eq!(encode_hex(job.extranonce1.as_ref()), "aabbccddee");
+        assert_eq!(job.extranonce2_size, 2);
     }
 
     /// Handing on the jobs is the whole point of the connection, so a client
