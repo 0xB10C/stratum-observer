@@ -1,13 +1,8 @@
-use crate::schema::job_updates;
-use crate::types::JobUpdate;
-use crate::types::JobUpdateJson;
-use crate::types::NewJobUpdate;
 use async_broadcast::broadcast;
 use async_channel::{unbounded, Receiver};
 use async_std::sync::Arc;
 use async_std::sync::RwLock;
 use async_std::task;
-use client::Client;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
@@ -17,13 +12,13 @@ use std::collections::BTreeMap;
 use std::net::TcpListener;
 use std::process::exit;
 use std::time::Duration;
+use stratum_observer::client::Client;
+use stratum_observer::config;
+use stratum_observer::schema::job_updates;
+use stratum_observer::types::JobUpdate;
+use stratum_observer::types::JobUpdateJson;
+use stratum_observer::types::NewJobUpdate;
 use tungstenite::accept;
-
-mod client;
-mod config;
-mod schema;
-mod types;
-mod utils;
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations/");
 
