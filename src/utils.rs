@@ -197,6 +197,72 @@ mod test {
     }
 
     #[test]
+    fn test_bip34_coinbase_block_height_edge_cases() {
+        // An empty script has no height in it.
+        assert_eq!(bip34_coinbase_block_height(&ScriptBuf::new()), None);
+
+        // The height is pushed with one up to four bytes, in little endian
+        // byte order.
+        let cases = vec![
+            ("0101", Some(1)),
+            ("02ffff", Some(65535)),
+            ("03ffffff", Some(16777215)),
+            ("0411223344", Some(0x44332211)),
+        ];
+        for (hex, height) in cases {
+            assert_eq!(
+                bip34_coinbase_block_height(&ScriptBuf::from_hex(hex).unwrap()),
+                height,
+                "height of {}",
+                hex
+            );
+        }
+
+        // A push that claims more bytes than the script holds is rejected
+        // rather than read past the end of the script.
+        for hex in ["01", "0211", "031122", "04112233", "0411"] {
+            assert_eq!(
+                bip34_coinbase_block_height(&ScriptBuf::from_hex(hex).unwrap()),
+                None,
+                "push longer than script: {}",
+                hex
+            );
+        }
+
+        // Five bytes is more than a height needs, so it isn't a height.
+        assert_eq!(
+            bip34_coinbase_block_height(&ScriptBuf::from_hex("051234567890").unwrap()),
+            None
+        );
+
+        // BIP34 heights are script numbers, where the top bit of the last byte
+        // is the sign. A push of 0x80 is therefore "negative zero", and one of
+        // 0x81 is -1. Heights are never negative in practice, and we read the
+        // bytes as a plain unsigned number, so this is what comes out.
+        assert_eq!(
+            bip34_coinbase_block_height(&ScriptBuf::from_hex("0180").unwrap()),
+            Some(128)
+        );
+        assert_eq!(
+            bip34_coinbase_block_height(&ScriptBuf::from_hex("0181").unwrap()),
+            Some(129)
+        );
+
+        // BIP34 also allows the heights 1 to 16 to be pushed with the single
+        // byte opcodes OP_1 (0x51) to OP_16 (0x60). That only ever applied to
+        // the first 16 blocks, which no pool is mining anymore, so we don't
+        // read them.
+        assert_eq!(
+            bip34_coinbase_block_height(&ScriptBuf::from_hex("51").unwrap()),
+            None
+        );
+        assert_eq!(
+            bip34_coinbase_block_height(&ScriptBuf::from_hex("60").unwrap()),
+            None
+        );
+    }
+
+    #[test]
     fn test_decode_hex() {
         let test_vec = vec![222, 173, 190, 239];
         let hex_og = "deadbeef";
