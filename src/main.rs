@@ -5,7 +5,7 @@ use log::{debug, error, info, warn};
 use std::process::exit;
 use stratum_observer::client::Client;
 use stratum_observer::config;
-use stratum_observer::database::db_writer_task;
+use stratum_observer::database::{db_writer_task, DEFAULT_RETRY_DELAY};
 use stratum_observer::websocket::websocket_sender_task;
 
 #[async_std::main]
@@ -53,7 +53,7 @@ async fn main() {
     // database writer task
     if let Some(db_url) = config.postgresql_url.clone() {
         task::spawn(async move {
-            db_writer_task(db_receiver, &db_url).await;
+            db_writer_task(db_receiver, &db_url, DEFAULT_RETRY_DELAY).await;
             exit(2)
         });
     } else {

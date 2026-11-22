@@ -11,7 +11,14 @@ use std::time::Duration;
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("./migrations/");
 
-pub async fn db_writer_task(receiver: Receiver<JobUpdate<'_>>, db_url: &str) {
+/// How long to wait before trying to reach the database again.
+pub const DEFAULT_RETRY_DELAY: Duration = Duration::from_secs(3);
+
+pub async fn db_writer_task(
+    receiver: Receiver<JobUpdate<'_>>,
+    db_url: &str,
+    retry_delay: Duration,
+) {
     info!("Started database writer task with database at {}", db_url);
     let mut first = true;
     loop {
@@ -22,11 +29,11 @@ pub async fn db_writer_task(receiver: Receiver<JobUpdate<'_>>, db_url: &str) {
                 let _ = receiver.recv().await;
             }
             debug!("discarded {} jobs from the database writer channel to avoid it becoming too full..", discarded_jobs);
-            task::sleep(Duration::from_secs(3)).await;
+            task::sleep(retry_delay).await;
         }
         first = false;
 
-        let mut conn = match PgConnection::establish(&db_url) {
+        let mut conn = match PgConnection::establish(db_url) {
             Ok(conn) => conn,
             Err(e) => {
                 error!("Could not connect to database: {}", e);
