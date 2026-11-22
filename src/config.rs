@@ -21,7 +21,9 @@ pub struct Config {
 impl Config {
     /// Parses a configuration from a TOML string and checks that it makes sense.
     pub fn from_toml_str(config_string: &str) -> Result<Config, ConfigError> {
-        let config: Config = toml::from_str(config_string)?;
+        let mut config: Config = toml::from_str(config_string)?;
+        config.postgresql_url = non_empty(config.postgresql_url);
+        config.websocket_address = non_empty(config.websocket_address);
         config.check()?;
         Ok(config)
     }
@@ -36,6 +38,12 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// An empty or blank setting means the same as leaving it out: the feature
+/// it belongs to is turned off.
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|v| !v.trim().is_empty())
 }
 
 /// Reads the configuration from the file at the given path.
@@ -177,6 +185,44 @@ mod tests {
             Some(String::from("postgres://user:password@host:1234/dbname"))
         );
         assert_eq!(config.pools[0].name, "From a file");
+    }
+
+    #[test]
+    fn empty_database_url_and_websocket_address_disable_them() {
+        let config = Config::from_toml_str(
+            r#"
+            postgresql_url = ""
+            websocket_address = "   "
+            pools = [
+                { endpoint = "stratum.example.com:1234", name = "Example", user = "username" },
+            ]
+        "#,
+        )
+        .expect("an empty url or address should not be an error");
+        assert_eq!(config.postgresql_url, None);
+        assert_eq!(config.websocket_address, None);
+    }
+
+    #[test]
+    fn a_database_url_and_websocket_address_are_kept() {
+        let config = Config::from_toml_str(
+            r#"
+            postgresql_url = "postgres://user:password@host:1234/dbname"
+            websocket_address = "127.0.0.1:57127"
+            pools = [
+                { endpoint = "stratum.example.com:1234", name = "Example", user = "username" },
+            ]
+        "#,
+        )
+        .expect("we should be able to parse this config");
+        assert_eq!(
+            config.postgresql_url,
+            Some(String::from("postgres://user:password@host:1234/dbname"))
+        );
+        assert_eq!(
+            config.websocket_address,
+            Some(String::from("127.0.0.1:57127"))
+        );
     }
 
     #[test]
