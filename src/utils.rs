@@ -76,18 +76,27 @@ pub fn bip34_coinbase_block_height(script: &ScriptBuf) -> Option<u32> {
     Some(u32::from_le_bytes(array))
 }
 
+/// Minimum number of printable characters in a row for them to be considered
+/// part of the coinbase tag.
+const MIN_COINBASE_STRING_RUN: usize = 6;
+
 pub fn extract_coinbase_string(script: &ScriptBuf) -> String {
     let mut coinbase_string = String::new();
     let mut buffer = String::new();
-    for b in script.clone().into_bytes() {
-        if b >= 32 && b <= 126 {
-            buffer.push(b as char);
+    for b in script.as_bytes() {
+        if (32..=126).contains(b) {
+            buffer.push(*b as char);
         } else {
-            if buffer.len() >= 6 {
+            if buffer.len() >= MIN_COINBASE_STRING_RUN {
                 coinbase_string.push_str(&buffer);
             }
             buffer.clear();
         }
+    }
+    // The script can end in the middle of a run of printable characters. Keep
+    // that last run too, instead of dropping it.
+    if buffer.len() >= MIN_COINBASE_STRING_RUN {
+        coinbase_string.push_str(&buffer);
     }
     coinbase_string
 }
@@ -123,6 +132,40 @@ mod test {
                 result,
             );
         }
+    }
+
+    #[test]
+    fn test_extract_coinbase_string_at_end_of_script() {
+        // A BIP34 height push followed by a tag that reaches the end of the
+        // script. Nothing follows the tag, so it has to be returned anyway.
+        let script = ScriptBuf::from_hex("03a4120d2f466f756e6472792055534120506f6f6c2f").unwrap();
+        assert_eq!(extract_coinbase_string(&script), "/Foundry USA Pool/");
+    }
+
+    #[test]
+    fn test_extract_coinbase_string_drops_short_runs() {
+        // Runs of less than six printable characters are dropped, both in the
+        // middle of the script and at its end.
+        let five = ScriptBuf::from_hex("00414243444500").unwrap();
+        assert_eq!(extract_coinbase_string(&five), "");
+        let five_at_end = ScriptBuf::from_hex("004142434445").unwrap();
+        assert_eq!(extract_coinbase_string(&five_at_end), "");
+        // Six characters are long enough.
+        let six = ScriptBuf::from_hex("00414243444546").unwrap();
+        assert_eq!(extract_coinbase_string(&six), "ABCDEF");
+    }
+
+    #[test]
+    fn test_extract_coinbase_string_concatenates_runs() {
+        // Two long runs separated by non printable bytes end up next to each
+        // other, without a separator in between.
+        let script = ScriptBuf::from_hex("414243444546ff00ff4748494a4b4c").unwrap();
+        assert_eq!(extract_coinbase_string(&script), "ABCDEFGHIJKL");
+    }
+
+    #[test]
+    fn test_extract_coinbase_string_empty_script() {
+        assert_eq!(extract_coinbase_string(&ScriptBuf::new()), "");
     }
 
     #[test]
